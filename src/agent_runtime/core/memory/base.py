@@ -32,3 +32,14 @@ class BaseMemory(ABC):
     async def query(self, query: MemoryQuery) -> list[MemoryEntry]: ...
     @abstractmethod
     async def clear(self) -> None: ...
+
+
+DEFAULT_SESSION_ID = "default"
+
+
+def normalize_session_id(value: str | None) -> str:
+    """会话标识归一：空串/纯空白/None 一律落到 `default`。
+
+    统一在这里归一，避免"有的地方判 None、有的地方判空串"导致同一会话被拆成两个键。
+    """
+    return (value or "").strip() or DEFAULT_SESSION_ID

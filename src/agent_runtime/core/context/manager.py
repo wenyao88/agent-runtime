@@ -23,6 +23,7 @@ except ImportError:  # 无 tiktoken 时退化为字符数估算，保证核心�
 
 
 from ..llm.types import Message
+from ..memory.annotate import MAX_DEFAULT_CHARS, format_line
 from .budget import TokenBudget
 from .compaction import (
     CompactionResult,
@@ -37,9 +38,11 @@ class ContextManager:
         self,
         budget: TokenBudget | None = None,
         keep_recent: int = 6,
+        memory_max_chars: int = MAX_DEFAULT_CHARS,
     ):
         self._budget = budget or TokenBudget()
         self._keep_recent = max(0, keep_recent)
+        self._memory_max_chars = memory_max_chars
         self._messages: list[Message] = []
 
     async def build(
@@ -52,8 +55,10 @@ class ContextManager:
         self._messages = []
         sys_text = system_prompt or "You are a helpful AI assistant with access to tools."
         if memory_entries:
+            # 记忆行带 [来源 · 日期] 标注：模型必须能区分"历史记忆"与"本轮工具结果"。
+            # 截断长度由构造参数决定（来自 MEMORY_INJECT_MAX_CHARS），截断必带省略号。
             sys_text += "\n\nRelevant Memories:\n" + "\n".join(
-                f"- {e.content[:200]}" for e in memory_entries
+                format_line(e, self._memory_max_chars) for e in memory_entries
             )
         self._messages.append(Message(role="system", content=sys_text))
         self._messages.append(Message(role="user", content=task))
