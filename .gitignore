@@ -30,3 +30,5 @@ tmp8aozlrn8/
 # OS
 .DS_Store
 Thumbs.db
+# pnpm store
+.pnpm-store/
