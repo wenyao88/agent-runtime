@@ -209,13 +209,17 @@ def register_github_tools(
     token: str = "",
     client: Any = None,
     base_url: str = DEFAULT_BASE_URL,
+    **http_kw: Any,
 ) -> list[str]:
-    """把 4 个 GitHub 工具注册进 registry，返回工具名列表。"""
+    """把 4 个 GitHub 工具注册进 registry，返回工具名列表。
+
+    `http_kw`（timeout / max_chars 等）原样透传给每个工具 —— 装配层需要能统一配置超时与截断。
+    """
     tools = [
-        GitHubGetRepoTool(token=token, base_url=base_url, client=client),
-        GitHubListDirTool(token=token, base_url=base_url, client=client),
-        GitHubReadFileTool(token=token, base_url=base_url, client=client),
-        GitHubSearchCodeTool(token=token, base_url=base_url, client=client),
+        GitHubGetRepoTool(token=token, base_url=base_url, client=client, **http_kw),
+        GitHubListDirTool(token=token, base_url=base_url, client=client, **http_kw),
+        GitHubReadFileTool(token=token, base_url=base_url, client=client, **http_kw),
+        GitHubSearchCodeTool(token=token, base_url=base_url, client=client, **http_kw),
     ]
     for tool in tools:
         registry.register(tool)

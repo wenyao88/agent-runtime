@@ -34,3 +34,14 @@ class Settings(BaseSettings):
 
     # GitHub
     github_token: str = ""
+
+    # Web search
+    web_search_provider: str = "duckduckgo"  # duckduckgo（免 key）| tavily（需 key）
+    web_search_api_key: str = ""
+
+    # Tools
+    tool_http_timeout_seconds: float = 20.0
+    tool_max_chars: int = 4000
+
+    # MCP（可选能力：文件缺失即视为不启用，不影响启动）
+    mcp_servers_file: str = "mcp_servers.json"

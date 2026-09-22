@@ -9,7 +9,7 @@ from agent_runtime.core.memory.manager import MemoryManager
 from agent_runtime.core.skill.router import SkillRouter
 from agent_runtime.core.tool.registry import ToolRegistry
 from agent_runtime.core.trace.tracer import Tracer
-from agent_runtime.infrastructure.tools.file_reader import FileReaderTool
+from agent_runtime.infrastructure.tools.catalog import register_native_tools
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -19,8 +19,25 @@ def get_settings() -> Settings:
     return Settings()
 
 
+@lru_cache
 def get_tool_registry() -> ToolRegistry:
-    return ToolRegistry()
+    """进程内共享的单一 registry。
+
+    必须是单例：MCP 工具在 lifespan 里被发现并注入**同一个** registry；
+    若每次调用都新建，/api/tools 与 Agent 就都看不到 MCP 工具。
+    """
+    settings = get_settings()
+    registry = ToolRegistry()
+    register_native_tools(
+        registry,
+        root=str(_PROJECT_ROOT),
+        github_token=settings.github_token,
+        web_search_provider=settings.web_search_provider,
+        web_search_api_key=settings.web_search_api_key,
+        http_timeout=float(settings.tool_http_timeout_seconds),
+        max_chars=settings.tool_max_chars,
+    )
+    return registry
 
 
 def get_memory_manager() -> MemoryManager:
@@ -51,12 +68,9 @@ def get_llm():
 
 def get_agent(llm=None) -> ReActLoop:
     s = get_settings()
-    registry = get_tool_registry()
-    if not registry.get("read_file"):
-        registry.register(FileReaderTool(root=str(_PROJECT_ROOT)))
     return ReActLoop(
         llm=llm or get_llm(),
-        tool_registry=registry,
+        tool_registry=get_tool_registry(),
         context_manager=get_context_manager(),
         memory_manager=get_memory_manager(),
         skill_router=get_skill_router(),

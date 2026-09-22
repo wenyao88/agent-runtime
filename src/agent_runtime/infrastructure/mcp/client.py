@@ -282,3 +282,23 @@ def load_mcp_servers(path: str) -> list[MCPServerConfig]:
             )
         )
     return servers
+
+
+async def bootstrap_mcp(
+    registry: Any,
+    servers_file: str,
+    client: "MCPClient",
+) -> tuple[list[str], list[str]]:
+    """按配置连接所有启用的 MCP Server，并把它们的工具注入 registry。
+
+    返回 (注入的工具名, 错误列表)。配置缺失/损坏或某个 server 起不来都**不抛异常**
+    —— MCP 是可选能力，绝不能阻断启动。
+    client 由调用方持有：lifespan 需要在关闭时 aclose() 它，否则子进程会泄漏。
+    """
+    servers = [cfg for cfg in load_mcp_servers(servers_file) if cfg.enabled]
+    if not servers:
+        return [], []
+    for cfg in servers:
+        await client.connect(cfg)
+    names = await client.discover_tools(registry)
+    return names, list(client.last_errors)

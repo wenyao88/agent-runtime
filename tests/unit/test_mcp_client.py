@@ -25,6 +25,7 @@ from agent_runtime.infrastructure.mcp.client import (
     MCPError,
     MCPServerConfig,
     StdioTransport,
+    bootstrap_mcp,
     load_mcp_servers,
 )
 
@@ -305,6 +306,56 @@ def test_load_mcp_servers_missing_or_broken_file_returns_empty() -> None:
         wrong_shape = Path(root) / "shape.json"
         wrong_shape.write_text('{"name": "not-a-list"}', encoding="utf-8")
         assert load_mcp_servers(str(wrong_shape)) == []
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# ── 启动装配（bootstrap）：把 MCP 工具注入同一个 registry ──
+
+
+def test_bootstrap_registers_mcp_tools_into_registry() -> None:
+    root = _new_root()
+    try:
+        path = Path(root) / "mcp_servers.json"
+        path.write_text(
+            json.dumps([{"name": "fs", "command": "python", "args": ["-m", "fake"]}]),
+            encoding="utf-8",
+        )
+        registry = ToolRegistry()
+        client = MCPClient(transport_factory=lambda cfg: FakeTransport())
+        names, errors = asyncio.run(bootstrap_mcp(registry, str(path), client=client))
+        assert names == ["fs__read_file"]
+        assert registry.get("fs__read_file") is not None
+        assert errors == []
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_bootstrap_with_missing_config_is_a_noop() -> None:
+    registry = ToolRegistry()
+    names, errors = asyncio.run(
+        bootstrap_mcp(registry, "/definitely/not/here.json", MCPClient())
+    )
+    assert names == []
+    assert errors == []
+    assert registry.list_all() == [], "MCP 是可选能力，配置缺失不得影响启动"
+
+
+def test_bootstrap_records_connect_failure_without_raising() -> None:
+    root = _new_root()
+    try:
+        path = Path(root) / "mcp_servers.json"
+        path.write_text(
+            json.dumps([{"name": "broken", "command": "python"}]), encoding="utf-8"
+        )
+        registry = ToolRegistry()
+        client = MCPClient(
+            transport_factory=lambda cfg: FakeTransport(init_error=PermissionError("spawn denied"))
+        )
+        names, errors = asyncio.run(bootstrap_mcp(registry, str(path), client=client))
+        assert names == []
+        assert registry.list_all() == []
+        assert any("broken" in e for e in errors), "连接失败必须被记录，而不是静默"
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
