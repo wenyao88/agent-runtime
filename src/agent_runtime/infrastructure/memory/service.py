@@ -62,6 +62,9 @@ async def list_memories(
 ) -> dict[str, Any]:
     """查询记忆。`manager` 只需鸭子类型地提供 short_term / long_term / recall。"""
     errors: list[str] = []
+    # manager 会把逐层失败记进它自己的 errors（`layer=all` 走 recall 时尤其如此）。
+    # 这里只取**本次调用新产生**的那一段：manager 是进程单例，重放历史错误会淹没当前问题。
+    recorded_before = len(getattr(manager, "errors", None) or [])
     if layer not in VALID_LAYERS:
         errors.append(f"未知 layer={layer!r}：可选 {', '.join(VALID_LAYERS)}")
         return {
@@ -87,6 +90,11 @@ async def list_memories(
                 entries = with_source(list(found or []), layer)
             except Exception as e:  # noqa: BLE001
                 errors.append(f"{layer} 查询失败：{type(e).__name__}: {e}")
+
+    # 把 manager 记下的失败带出来 —— 否则降级路径上接口会回 `errors: []`，看起来一切正常（C1 回归点）
+    for recorded in list(getattr(manager, "errors", None) or [])[recorded_before:]:
+        if recorded not in errors:
+            errors.append(recorded)
 
     memories = memory_catalog(entries)
     return {

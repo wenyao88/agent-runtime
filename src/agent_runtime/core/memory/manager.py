@@ -12,6 +12,9 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
+import logging
+
+_logger = logging.getLogger(__name__)
 
 from .annotate import (
     SOURCE_LONG,
@@ -44,12 +47,21 @@ class MemoryManager:
         self.long_term = long_term
         self.summarizer = summarizer
         self.errors: list[str] = []
+        self._logged: set[str] = set()
 
     # ---- internals ----
     def _record(self, message: str) -> None:
+        """记账 + **打一条日志**。
+
+        只记账不打日志等于没记：本机实测中，Redis/PG 挂掉时任务照常跑完，
+        运维侧却什么痕迹都没有（这正是 C1）。同一句错误只打一次，避免刷屏。
+        """
         self.errors.append(message)
         if len(self.errors) > MAX_ERRORS:
             del self.errors[:-MAX_ERRORS]
+        if message not in self._logged:
+            self._logged.add(message)
+            _logger.warning("memory: %s", message)
 
     async def _safe_query(self, layer, query: MemoryQuery, source: str) -> list[MemoryEntry]:
         if layer is None:

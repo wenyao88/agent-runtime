@@ -178,6 +178,31 @@ def test_working_layer_is_never_exposed_or_cleared() -> None:
     assert short_circuit, "all 走 recall，工作记忆本就会命中（这是既有级联语义）"
 
 
+def test_list_all_surfaces_manager_side_failures() -> None:
+    """C1 回归：`layer=all` 走 `manager.recall`，逐层失败被 manager 吞进它自己的 `errors`。
+
+    必须把这些错误带出来 —— 否则在 D4 的降级路径上（Redis/PG 挂了但开关是开的），
+    唯一面向运维的记忆接口会回 `count 0 / errors []`，看起来"一切正常"，而日志里也没有任何痕迹。
+    这正是本项目命名的那类"能力静默降级"。
+    """
+    bad = FakeLayer(raises=RuntimeError("redis down"))
+    manager = MemoryManager(working=WorkingMemory(), short_term=bad)
+    body = _run(list_memories(manager, query="x", top_k=3, layer="all"))
+    assert body["memories"] == []
+    assert any("redis down" in e for e in body["errors"]), body
+
+
+def test_list_all_does_not_replay_old_manager_errors() -> None:
+    """只带出**本次查询**新产生的错误：manager 是进程单例，历史错误重放会淹没当前问题。"""
+    bad = FakeLayer(raises=RuntimeError("boom"))
+    manager = MemoryManager(working=WorkingMemory(), short_term=bad)
+    _run(manager.recall(MemoryQuery(text="x", top_k=1)))  # 先制造一条历史错误
+    assert manager.errors, "前置条件：历史错误已存在"
+    bad.raises = None  # 层恢复正常：这样"本次查询"确实没产生新错误
+    body = _run(list_memories(manager, query="ok", top_k=3, layer="all"))
+    assert body["errors"] == [], body
+
+
 def _run_all() -> None:
     failed = []
     for name, fn in sorted(globals().items()):
