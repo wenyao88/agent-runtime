@@ -183,6 +183,41 @@ def test_load_file_requires_body() -> None:
 # ── 目录加载：坏文件不影响好文件 ──
 
 
+def test_non_utf8_file_does_not_kill_the_whole_directory() -> None:
+    """回归：非 UTF-8 文件（二进制被误命名成 .md）曾让 load_directory 直接抛 UnicodeDecodeError，
+    结果**整个目录一个技能都没加载**（好文件被连带丢掉），只留一行错误。
+
+    "坏文件只记错误、好文件仍加载" 是本阶段写死的 DoD，所以这里钉住。
+    """
+    root = _new_root()
+    try:
+        _write(root, "aaa_good.md", GOOD)
+        (Path(root) / "z_binary.md").write_bytes(
+            b"---\nname: b\ndescription: d\n---\n\xff\xfe\x00\x81"
+        )
+        skills, errors = SkillLoader.load_directory(root)
+        assert [s.manifest.name for s in skills] == ["github_analysis"], "好文件必须仍被加载"
+        assert any("z_binary.md" in e for e in errors), errors
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_load_file_reports_undecodable_file_as_format_error() -> None:
+    """load_file 的契约是「抛 SkillFormatError」——不能把 UnicodeDecodeError 漏给调用方。"""
+    root = _new_root()
+    try:
+        path = Path(root) / "binary.md"
+        path.write_bytes(b"---\nname: x\ndescription: d\n---\n\xff\xfe")
+        try:
+            SkillLoader.load_file(str(path))
+        except SkillFormatError:
+            pass
+        else:
+            raise AssertionError("非 UTF-8 文件必须报 SkillFormatError")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_load_directory_keeps_good_skills_and_reports_bad_ones() -> None:
     root = _new_root()
     try:

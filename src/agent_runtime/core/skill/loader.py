@@ -135,7 +135,9 @@ class SkillLoader:
         file_path = Path(path)
         try:
             text = file_path.read_text(encoding="utf-8")
-        except OSError as e:
+        except (OSError, UnicodeDecodeError) as e:
+            # UnicodeDecodeError 必须一起接住：否则一个二进制文件被误命名成 .md，
+            # 就会让 load_directory 直接抛出去，把**同目录下所有好技能一起丢掉**。
             raise SkillFormatError(f"读取失败：{e}") from None
 
         data, body = cls.parse_front_matter(text)
