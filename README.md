@@ -137,6 +137,58 @@ tags: [code]
 - **失败即降级**：规划 LLM 报错/返回空 → 不注入任何计划文本，主任务照常跑。
 - **技能与坏文件都不会阻断启动**：加载错误只记在 `app.state.skill_errors` 里。
 
+## Memory：三层记忆（默认全关）
+
+| 层 | 存储 | 范围 | 检索方式 |
+|---|---|---|---|
+| Working | 进程内 | 单次任务 | 子串匹配（已有） |
+| Short-term | Redis List + TTL | **单会话**（`session_id`） | 最近 N 条 + 子串过滤 |
+| Long-term | PostgreSQL + pgvector | 跨会话 | **余弦距离语义检索** |
+
+召回顺序 `working → short_term → long_term`，够 `MEMORY_RECALL_TOP_K` 条即**短路**（不查更慢的持久层）。
+
+### 开启步骤
+
+```bash
+cp .env.example .env
+# 打开需要的层（默认全关：没起 DB/Redis 也不影响启动与任务）
+#   MEMORY_SHORT_TERM_ENABLED=true
+#   MEMORY_LONG_TERM_ENABLED=true      # 还需要 EMBEDDING_API_KEY
+#   MEMORY_CONSOLIDATE_ENABLED=true    # 任务结束用 JUDGE_LLM 压成一条长期记忆
+
+docker compose up -d          # api 启动时会自动执行 alembic upgrade head
+# 或本地手动：
+alembic upgrade head
+```
+
+**任一层不可用只记错误、不阻断启动与任务**：装配期错误进 `app.state.memory_errors`（`GET /api/memories` 的
+`settings.errors` 也能看到），运行期错误进 `MemoryManager.errors`（有上限，manager 是进程单例）。这是刻意的：
+`ReActLoop` 结尾写记忆的那一步**没有 try 保护**，所以"记忆写失败"必须由记忆层自己咽下去。
+
+### 召回如何进入上下文
+
+带**来源与日期**标注、截断带省略号：
+
+```
+Relevant Memories:
+- [long_term · 2026-09-21] 上次调研结论：pgvector 的运维成本最低…
+- [short_term] 本会话前面确认过 Qdrant 的许可协议…
+```
+
+这样模型能区分"历史记忆"和"本轮工具结果"（本项目一贯的"证据可追溯"主题）。
+长度上限 `MEMORY_INJECT_MAX_CHARS`（默认 500，超出带 `…` 标记）。
+
+### 天花板（不静默）
+
+| 项 | 现状 | 升级路径 |
+|---|---|---|
+| 向量维度 | 固定 1024，换模型需迁移 + 重算历史向量 | 维度配置化 + 双列灰度迁移 |
+| 索引 | ivfflat `lists=100` | 数据量上来后改 hnsw，调 `m`/`ef_construction` |
+| 记忆淘汰 | 只有"每会话最多 N 条 + TTL" | 按访问频次/重要性衰减（需额外统计列） |
+| `consolidate` | 单次 LLM 摘要，**不保证无损**；失败降级为原文截断 | 多轮摘要 + 保留原文引用链 |
+| 短时 `clear()` | 只删**单会话**（`DELETE /api/memories` 清的是默认会话）；long_term 是全表清空 | 全量清空用 `SCAN`；按会话删需加列 |
+| 三层写入 | **无事务**，各自 best-effort | 出站队列 / 补偿任务 |
+
 ## Demo 1：GitHub 仓库分析
 
 ```bash
@@ -179,7 +231,28 @@ python tests/unit/test_mcp_client.py
 
 覆盖范围：ReAct 循环 / 工具契约与 schema / HTTP 工具基座 / GitHub・搜索・抓取・PDF 四个工具 /
 MCP 客户端与 schema 翻译 / 上下文压缩（SQUEEZE・TRUNCATE・策略升级）/ 工具装配 /
-Skill 加载・打分路由・内置技能・装配 / TaskPlanner / Demo 脚本契约 / API 冒烟（无 fastapi 时自动 SKIP）。
+Skill 加载・打分路由・内置技能・装配 / TaskPlanner / 三层记忆与召回标注 / Alembic 迁移内容 /
+Demo 脚本契约 / **仓库编码约定** / API 冒烟（无 fastapi 时自动 SKIP）。
+
+## 编码约定（踩过三次的坑，现已用测试锁死）
+
+本项目中文注释很多，而"编码"这一族问题在本仓库发作过三次，症状都很隐蔽：
+
+1. 用 GBK 存一个技能 `.md` → **整个技能目录**加载失败，好文件被连带丢掉；
+2. 用 Windows PowerShell 5.1 的 `Set-Content`（默认 ANSI）改源文件 → UTF-8 源码变乱码，不可恢复；
+3. `alembic.ini` 里写了中文注释 → 中文 Windows 上 `alembic upgrade head` 直接 `UnicodeDecodeError`。
+
+根因不是"中文有罪"，而是**谁读这个文件、用什么编码读**：
+
+| 文件类型 | 读取方 | 约定 |
+|---|---|---|
+| `.py` | Python（PEP 3120 固定 UTF-8） | **中文安全**，注释/文档字符串照写 |
+| `.md` / `.json` / `.yml` / `.toml` | 我们或明确的 UTF-8 读取 | 中文安全 |
+| `*.ini` / `*.cfg` / `*.conf` / `*.mako` | **外部工具按 locale 编码读**（如 Alembic 的 configparser） | **必须纯 ASCII**，注释用英文 |
+
+`tests/unit/test_repo_encoding.py` 全仓库守护这条界线（既检查 locale 读取类文件无非 ASCII 字节，
+也检查源码/资产是合法 UTF-8），并有一条**反向断言**防止把它过度推广成"代码里不许出现中文"。
+另：**不要用 PowerShell 文本管道改仓库源文件**，用编辑工具（`write`/`edit`）。
 
 ## Roadmap
 
@@ -187,7 +260,7 @@ Skill 加载・打分路由・内置技能・装配 / TaskPlanner / Demo 脚本�
 - [x] Phase 1 ReAct 最小闭环：LLM Provider + ReActLoop + FileReaderTool + chat/ws + ChatPage
 - [x] Phase 2 Tool 生态 + MCP Client：8 个原生工具 + MCP Client/Adapter + SQUEEZE/TRUNCATE 压缩 + `GET /api/tools`
 - [x] Phase 3 Skill + TaskPlanner：Markdown 技能加载 + 关键词打分路由 + 2 个内置技能 + TaskPlanner（默认关）+ `GET /api/skills`
-- [ ] Phase 4 Memory 持久化 (Redis + pgvector)
+- [x] Phase 4 Memory 持久化：三层记忆（Working / Redis Short-term / PG+pgvector Long-term）+ Embedding + Alembic 迁移 + `GET/DELETE /api/memories`（默认全关）
 - [ ] Phase 5 Compaction 完整版 (SUMMARIZE)
 - [ ] Phase 6 Benchmark 系统
 - [ ] Phase 7 消融实验 + 100~120 条数据集
