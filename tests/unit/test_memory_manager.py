@@ -255,6 +255,30 @@ def test_build_without_memories_has_no_memory_section() -> None:
     assert "Relevant Memories" not in _system_prompt(cm)
 
 
+def test_store_summarizes_persistent_layers_but_keeps_working_raw() -> None:
+    """接上 summarizer 后（D5），持久层存摘要、**工作层留原文** —— 同会话召回需要原始细节。
+
+    这条也是"摘要器不接进主链路就是死配置"的回归：ReActLoop 结束走的是 store。
+    """
+
+    async def summarizer(text: str) -> str:
+        return f"摘要({text})"
+
+    working = WorkingMemory()
+    long_ = FakeLayer()
+    mgr = MemoryManager(working=working, long_term=long_, summarizer=summarizer)
+    _run(mgr.store(MemoryEntry(content="原始长文本", metadata={"type": "task_summary"})))
+    assert long_.stored[0].content == "摘要(原始长文本)"
+    assert working._entries[0].content == "原始长文本", "工作层必须保留原文"
+
+
+def test_store_without_summarizer_persists_raw_text() -> None:
+    long_ = FakeLayer()
+    mgr = MemoryManager(working=WorkingMemory(), long_term=long_)
+    _run(mgr.store(MemoryEntry(content="原文")))
+    assert long_.stored[0].content == "原文"
+
+
 def _run_all() -> None:
     failed = []
     for name, fn in sorted(globals().items()):

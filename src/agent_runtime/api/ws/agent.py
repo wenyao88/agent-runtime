@@ -21,7 +21,8 @@ async def agent_ws(ws: WebSocket, session_id: str) -> None:
                 )
                 continue
             agent = get_agent()
-            async for ev in agent.run_stream(task):
+            # 会话标识来自 URL：短时记忆按会话隔离，不传的话所有会话会挤在同一个 Redis 键里
+            async for ev in agent.run_stream(task, session_id=session_id):
                 await ws.send_json({"event_type": ev.event_type.value, "data": ev.data})
             last = agent.last_result
             await ws.send_json(

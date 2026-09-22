@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 
 from .annotate import (
     SOURCE_LONG,
@@ -75,9 +76,36 @@ class MemoryManager:
             id_ = await self.working.store(entry)
         except Exception as e:  # noqa: BLE001 —— by design
             self._record(f"{SOURCE_WORKING} 写入失败：{type(e).__name__}: {e}")
-        await self._safe_store(self.short_term, SOURCE_SHORT, entry)
-        await self._safe_store(self.long_term, SOURCE_LONG, entry)
+        await self._persist(entry)
         return id_ or ""
+
+    async def _summarize(self, text: str) -> str:
+        """用注入的 summarizer 压成一条长期记忆；失败/空结果 → 降级为原文截断。"""
+        if self.summarizer is None:
+            return text
+        try:
+            produced = await self.summarizer(text)
+        except Exception as e:  # noqa: BLE001 —— by design：摘要失败不丢记忆
+            self._record(f"摘要失败，降级为原文：{type(e).__name__}: {e}")
+            return text
+        if isinstance(produced, str) and produced.strip():
+            return produced.strip()
+        return text
+
+    async def _persist(self, entry: MemoryEntry) -> None:
+        """写入**持久层**（short_term / long_term）。
+
+        `store`（每轮任务结束）与 `consolidate`（显式整理）共用这一条路径 ——
+        否则两处各写一遍会**双写**，或者摘要器永远不被调用（就成了死配置）。
+        持久层只留摘要后的内容；**工作层留原文**（同会话内召回要的是原始细节）。
+        持久内容一律截断并带标记：持久层不该存无界文本。
+        """
+        text = await self._summarize(entry.content or "")
+        if len(text) > MAX_CONSOLIDATE_CHARS:
+            text = text[:MAX_CONSOLIDATE_CHARS] + TRUNCATED_MARK
+        persisted = replace(entry, content=text)  # 不改原对象：工作层那份要保留原文
+        await self._safe_store(self.short_term, SOURCE_SHORT, persisted)
+        await self._safe_store(self.long_term, SOURCE_LONG, persisted)
 
     async def recall(self, query: MemoryQuery) -> list[MemoryEntry]:
         merged = await self._safe_query(self.working, query, SOURCE_WORKING)
@@ -88,24 +116,13 @@ class MemoryManager:
         return sort_entries(dedupe(merged))[: query.top_k]
 
     async def consolidate(self, task_summary: str, session_id: str = "") -> None:
+        """显式整理一段文本并写入持久层（供调用方 / Benchmark 使用）。"""
         text = (task_summary or "").strip()
         if not text:
             return
-        summary = text
-        if self.summarizer:
-            try:
-                produced = await self.summarizer(text)
-            except Exception as e:  # noqa: BLE001 —— by design：摘要失败降级，不丢记忆
-                self._record(f"摘要失败，降级为原文：{type(e).__name__}: {e}")
-            else:
-                if isinstance(produced, str) and produced.strip():
-                    summary = produced.strip()
-        if len(summary) > MAX_CONSOLIDATE_CHARS:
-            summary = summary[:MAX_CONSOLIDATE_CHARS] + TRUNCATED_MARK
         entry = MemoryEntry(
-            content=summary,
+            content=text,
             role="agent",
             metadata={"type": "summary", "session_id": normalize_session_id(session_id)},
         )
-        await self._safe_store(self.short_term, SOURCE_SHORT, entry)
-        await self._safe_store(self.long_term, SOURCE_LONG, entry)
+        await self._persist(entry)

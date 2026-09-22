@@ -14,6 +14,7 @@ from agent_runtime.core.agent.react import DEFAULT_SYSTEM_PROMPT, ReActLoop
 from agent_runtime.core.context.budget import TokenBudget
 from agent_runtime.core.context.manager import ContextManager
 from agent_runtime.core.llm.types import FunctionCall, LLMResponse, TokenUsage
+from agent_runtime.core.memory.base import MemoryEntry, MemoryQuery
 from agent_runtime.core.memory.manager import MemoryManager
 from agent_runtime.core.memory.working import WorkingMemory
 from agent_runtime.core.skill.base import SkillManifest
@@ -46,17 +47,18 @@ def _tc(call_id: str, arguments: str, usage: TokenUsage | None = None) -> LLMRes
     )
 
 
-def _setup(script: list[LLMResponse], *, max_steps: int = 15, **agent_kw):
+def _setup(script: list[LLMResponse], *, max_steps: int = 15, memory_manager=None, **agent_kw):
     """真实组件组装：MockLLM + FileReaderTool + 真 ContextManager/MemoryManager/Tracer。
 
-    `**agent_kw` 透传给 ReActLoop（Phase 3 的 skill_router / planner / skill_top_k 走这里）。
+    `**agent_kw` 透传给 ReActLoop（Phase 3 的 skill_router / planner / skill_top_k，
+    Phase 4 的 session_id 走这里）；`memory_manager` 可显式覆盖（Phase 4 会话标识测试用）。
     """
     root = _new_root()
     (Path(root) / "a.txt").write_text("hello react", encoding="utf-8")
     registry = ToolRegistry()
     registry.register(FileReaderTool(root=root))
     ctx = ContextManager(budget=TokenBudget())
-    memory = MemoryManager(working=WorkingMemory())
+    memory = memory_manager or MemoryManager(working=WorkingMemory())
     tracer = Tracer()
     agent = ReActLoop(
         llm=MockLLMProvider(script=script),
@@ -437,6 +439,103 @@ async def test_planner_failure_is_silent():
         result = await agent.run("分析 fastapi 仓库")
         assert result.final_answer == "done", "规划失败不得影响主任务"
         assert _sys_prompt(agent).startswith(DEFAULT_SYSTEM_PROMPT)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# ── Phase 4：会话标识贯通 + 注入顺序（记忆在最后）──
+
+
+class _RecordingLayer:
+    """记录收到的 MemoryQuery / 存储条目，用于断言会话标识真的传下去了。"""
+
+    def __init__(self, entries=None):
+        self.queries = []
+        self.stored = []
+        self._entries = list(entries or [])
+
+    async def query(self, query):
+        self.queries.append(query)
+        return list(self._entries)
+
+    async def store(self, entry):
+        self.stored.append(entry)
+        return "id"
+
+    async def clear(self):
+        return None
+
+
+def _memory_layer(entries=None):
+    layer = _RecordingLayer(entries)
+    return layer
+
+
+async def test_run_passes_session_id_into_memory_query() -> None:
+    layer = _memory_layer()
+    manager = MemoryManager(working=WorkingMemory(), short_term=layer)
+    agent, ctx, mem, tracer, root = _setup([LLMResponse(content="done")], memory_manager=manager)
+    try:
+        await agent.run("任务", session_id="s42")
+        assert layer.queries and layer.queries[0].session_id == "s42"
+        # 工作记忆先命中时不会查短时层；这里让 working 查不到，确保走到 short_term
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_constructor_session_id_is_used_when_call_omits_it() -> None:
+    layer = _memory_layer()
+    manager = MemoryManager(working=WorkingMemory(), short_term=layer)
+    agent, ctx, mem, tracer, root = _setup(
+        [LLMResponse(content="done")], memory_manager=manager, session_id="from-ctor"
+    )
+    try:
+        await agent.run("任务")
+        assert layer.queries and layer.queries[0].session_id == "from-ctor"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_blank_session_id_normalizes_to_default() -> None:
+    layer = _memory_layer()
+    manager = MemoryManager(working=WorkingMemory(), short_term=layer)
+    agent, ctx, mem, tracer, root = _setup([LLMResponse(content="done")], memory_manager=manager)
+    try:
+        await agent.run("任务", session_id="   ")
+        assert layer.queries[0].session_id == "default"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_task_summary_entry_records_session_id() -> None:
+    layer = _memory_layer()
+    manager = MemoryManager(working=WorkingMemory(), short_term=layer)
+    agent, ctx, mem, tracer, root = _setup([LLMResponse(content="done")], memory_manager=manager)
+    try:
+        await agent.run("任务", session_id="s7")
+        assert layer.stored and layer.stored[0].metadata["session_id"] == "s7"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_memory_is_injected_after_skills_and_plan() -> None:
+    """注入顺序：硬规则 → 技能 → 计划 → 记忆。记忆必须**最后**（它是参考资料，优先级最低）。"""
+    layer = _memory_layer([MemoryEntry(content="历史结论", source="short_term")])
+    manager = MemoryManager(working=WorkingMemory(), short_term=layer)
+    planner = TaskPlanner(llm=MockLLMProvider([LLMResponse(content="PLAN-TEXT")]))
+    agent, ctx, mem, tracer, root = _setup(
+        [LLMResponse(content="done")],
+        memory_manager=manager,
+        skill_router=_router(_skill("gh", ["代码审查"])),
+        planner=planner,
+    )
+    try:
+        await agent.run("帮我做代码审查", session_id="s1")
+        prompt = _sys_prompt(agent)
+        assert prompt.startswith(DEFAULT_SYSTEM_PROMPT)
+        assert prompt.index(SKILL_BODY) > prompt.index("HARD RULES")
+        assert prompt.index("PLAN-TEXT") > prompt.index(SKILL_BODY)
+        assert prompt.index("历史结论") > prompt.index("PLAN-TEXT"), "记忆必须排在技能与计划之后"
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

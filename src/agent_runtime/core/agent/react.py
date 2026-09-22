@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator
 from ..context.manager import ContextManager
 from ..llm.base import BaseLLMProvider
 from ..llm.types import FunctionCall, Message, TokenUsage
-from ..memory.base import MemoryEntry, MemoryQuery
+from ..memory.base import MemoryEntry, MemoryQuery, normalize_session_id
 from ..memory.manager import MemoryManager
 from ..skill.router import SkillRouter
 from ..trace.tracer import Tracer
@@ -53,6 +53,7 @@ class ReActLoop:
         skill_router: SkillRouter | None = None,
         planner: TaskPlanner | None = None,
         skill_top_k: int = 1,
+        session_id: str = "",
         tracer: Tracer | None = None,
         max_steps: int = 15,
         tool_timeout: float = 30.0,
@@ -64,19 +65,20 @@ class ReActLoop:
         self.skills = skill_router
         self.planner = planner
         self.skill_top_k = skill_top_k
+        self.session_id = session_id
         self.tracer = tracer
         self.max_steps = max_steps
         self.tool_timeout = tool_timeout
         self.last_result: AgentResult | None = None
 
     # ---- public API ----
-    async def run(self, task: str) -> AgentResult:
-        async for _ in self._execute(task):
+    async def run(self, task: str, session_id: str = "") -> AgentResult:
+        async for _ in self._execute(task, session_id):
             pass
         return self.last_result
 
-    async def run_stream(self, task: str) -> AsyncIterator[AgentEvent]:
-        async for ev in self._execute(task):
+    async def run_stream(self, task: str, session_id: str = "") -> AsyncIterator[AgentEvent]:
+        async for ev in self._execute(task, session_id):
             yield ev
 
     # ---- internals ----
@@ -106,11 +108,13 @@ class ReActLoop:
             return ToolResult(tool_name=tc.name, success=False,
                               text=f"Error: {type(e).__name__}: {e}")
 
-    async def _execute(self, task: str) -> AsyncIterator[AgentEvent]:
+    async def _execute(self, task: str, session_id: str = "") -> AsyncIterator[AgentEvent]:
         t_start = time.monotonic()
         total = TokenUsage()
         steps: list[AgentStep] = []
         trace_id = ""
+        # 会话标识归一（空串 → default）：短时记忆按会话隔离，不补这条链路所有会话会挤在同一个键里
+        sid = normalize_session_id(session_id or self.session_id)
 
         # 1) Skill 命中（纯计算，先做：trace session 一开始就能带上 skills）
         matched = self.skills.match(task, self.skill_top_k) if self.skills else []
@@ -130,10 +134,12 @@ class ReActLoop:
             plan_text = await self.planner.plan(task, self.tools.get_names())
             if plan_text:
                 sys_extra += "\n\n## 执行计划（仅供参考，可按实际情况调整）\n" + plan_text
-        # 3) 可选 Memory 召回
+        # 3) 可选 Memory 召回（带会话标识：短时记忆按会话隔离）
         memories = []
         if self.memory:
-            memories = await self.memory.recall(MemoryQuery(text=task, top_k=3))
+            memories = await self.memory.recall(
+                MemoryQuery(text=task, top_k=3, session_id=sid)
+            )
 
         await self.ctx.build(
             task=task, tools=self.tools.list_schemas(), memory_entries=memories,
@@ -240,6 +246,6 @@ class ReActLoop:
         if self.memory:
             await self.memory.store(MemoryEntry(
                 content=f"task: {task}\nanswer: {answer[:500]}",
-                role="agent", metadata={"type": "task_summary"}))
+                role="agent", metadata={"type": "task_summary", "session_id": sid}))
         if self.tracer:
             await self.tracer.end_session(self.last_result)

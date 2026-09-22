@@ -10,7 +10,7 @@ router = APIRouter(prefix="/api", tags=["chat"])
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest, agent: ReActLoop = Depends(get_agent_dep)) -> ChatResponse:
     """跑一次完整的 ReAct 循环，返回最终答案与用量统计。"""
-    result = await agent.run(req.task)
+    result = await agent.run(req.task, session_id=req.session_id or "")
     return ChatResponse(
         final_answer=result.final_answer,
         steps=len(result.steps),
