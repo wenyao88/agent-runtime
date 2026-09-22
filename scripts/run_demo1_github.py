@@ -59,14 +59,29 @@ def format_warning(warning: str | None) -> str:
     return f"⚠ 注意：{warning}"
 
 
+def format_skills(skills_used: object) -> str:
+    """命中技能的可视化一行；没命中就返回空串（不打印"命中 0 个"这类噪音）。
+
+    本机实测暴露的漏：技能明明装配上了，脚本却既不打印 `skill_matched` 事件、
+    摘要里也没有 `skills_used` —— 等于把这套可见性机制藏起来。
+    """
+    names = [str(s) for s in (skills_used or [])]
+    if not names:
+        return ""
+    return f"🎯 命中技能：{', '.join(names)}"
+
+
 def format_summary(result: object) -> str:
-    """收尾摘要：步数 / token / 耗时 / trace，以及**告警**（有就必须出现）。"""
+    """收尾摘要：步数 / token / 耗时 / trace / **命中技能**，以及**告警**（有就必须出现）。"""
     steps = len(getattr(result, "steps", None) or [])
     usage = getattr(result, "total_tokens", None)
     tokens = getattr(usage, "total_tokens", 0) if usage is not None else 0
     latency = getattr(result, "total_latency_ms", 0)
     trace_id = getattr(result, "trace_id", "")
     lines = [f"步数 {steps} · token {tokens} · 耗时 {latency}ms · trace {trace_id}"]
+    skills_line = format_skills(getattr(result, "skills_used", None))
+    if skills_line:
+        lines.append(skills_line)
     rendered = format_warning(getattr(result, "warning", None))
     if rendered:
         lines.append(rendered)
@@ -90,9 +105,32 @@ def _require_deps() -> str | None:
     )
 
 
-def build_agent():
-    """真实链路：真实 LLM + 全部原生工具（含 4 个 GitHub 工具）。"""
-    from agent_runtime.config.settings import Settings
+def build_skill_router(settings: object):
+    """加载 `skills/` 目录里的技能（纯标准库，因此沙箱内可测）。
+
+    Demo 1 的 ReActLoop **必须**拿到这个 router：否则 `matched` 恒为空、
+    `skills_used` 永远是 []、`skill_matched` 事件永不触发 —— 这正是本机实测暴露的漏装配。
+    相对目录按**项目根**解析（不按 CWD），坏文件只打印告警、不阻断演示。
+    """
+    from agent_runtime.core.skill.router import SkillRouter
+    from agent_runtime.infrastructure.skills.catalog import (
+        register_skills_from_dir,
+        resolve_skills_dir,
+    )
+
+    skills_dir = str(getattr(settings, "skills_dir", "skills"))
+    router = SkillRouter()
+    for error in register_skills_from_dir(router, resolve_skills_dir(skills_dir, str(_ROOT))):
+        print(f"⚠ 技能加载问题：{error}")
+    return router
+
+
+def build_agent(settings: object | None = None, llm: object | None = None):
+    """真实链路：真实 LLM + 全部原生工具（含 4 个 GitHub 工具）+ 真实技能。
+
+    `settings` / `llm` 可注入：沙箱里装不上 openai / pydantic_settings，
+    只有让这两样可注入，"到底装配了哪些东西"才能被测试真正验证（而不是靠读码相信）。
+    """
     from agent_runtime.core.agent.react import ReActLoop
     from agent_runtime.core.context.budget import TokenBudget
     from agent_runtime.core.context.manager import ContextManager
@@ -100,14 +138,12 @@ def build_agent():
     from agent_runtime.core.memory.working import WorkingMemory
     from agent_runtime.core.tool.registry import ToolRegistry
     from agent_runtime.core.trace.tracer import Tracer
-    from agent_runtime.infrastructure.llm.openai_compatible import OpenAICompatibleProvider
     from agent_runtime.infrastructure.tools.catalog import register_native_tools
 
-    settings = Settings()
-    if not settings.llm_api_key:
-        raise RuntimeError(
-            "未配置 LLM_API_KEY：请复制 .env.example 为 .env，并填入硅基流动/DeepSeek 等 OpenAI 兼容端点的 key"
-        )
+    if settings is None:
+        from agent_runtime.config.settings import Settings
+
+        settings = Settings()
 
     registry = ToolRegistry()
     register_native_tools(
@@ -119,12 +155,23 @@ def build_agent():
         http_timeout=float(settings.tool_http_timeout_seconds),
         max_chars=settings.tool_max_chars,
     )
-    llm = OpenAICompatibleProvider(
-        api_key=settings.llm_api_key,
-        base_url=settings.llm_base_url,
-        model=settings.llm_model,
-        temperature=settings.llm_temperature,
-    )
+
+    if llm is None:
+        from agent_runtime.infrastructure.llm.openai_compatible import (
+            OpenAICompatibleProvider,
+        )
+
+        if not settings.llm_api_key:
+            raise RuntimeError(
+                "未配置 LLM_API_KEY：请复制 .env.example 为 .env，并填入硅基流动/DeepSeek 等 OpenAI 兼容端点的 key"
+            )
+        llm = OpenAICompatibleProvider(
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
+            model=settings.llm_model,
+            temperature=settings.llm_temperature,
+        )
+
     return ReActLoop(
         llm=llm,
         tool_registry=registry,
@@ -132,6 +179,8 @@ def build_agent():
             budget=TokenBudget(model_max_tokens=settings.llm_max_tokens)
         ),
         memory_manager=MemoryManager(working=WorkingMemory()),
+        skill_router=build_skill_router(settings),
+        skill_top_k=int(getattr(settings, "agent_skill_top_k", 1)),
         tracer=Tracer(),
         max_steps=max(8, settings.agent_max_steps),
     )
@@ -158,6 +207,10 @@ async def run(repo: str, focus: str) -> int:
             print(f"📋 [{flag} {data.get('latency_ms', 0)}ms] {body}")
         elif kind == "compaction":
             print(f"⚡ 压缩 {data['before']} → {data['after']}（{data['strategy']}）")
+        elif kind == "skill_matched":
+            line = format_skills(data.get("skills"))
+            if line:
+                print(line)
         elif kind == "final_answer":
             print(f"\n✨ 最终报告：\n{data['content']}")
 

@@ -133,6 +133,141 @@ def test_tool_result_short_text_is_untouched() -> None:
     assert module.format_tool_result("only line", max_lines=3) == "only line"
 
 
+# ── Demo 1 的 Skill 装配（本机实测"看不到 skill_matched"暴露出的漏装配）──
+#
+# 症状：跑 Demo 1 时没有任何技能痕迹。根因不是匹配失败，而是
+# `build_agent()` 建 ReActLoop 时**根本没传 skill_router** —— 于是
+# react.py 里 `matched = self.skills.match(...) if self.skills else []` 恒为空，
+# `skills_used` 永远是 []，`skill_matched` 永远不会触发。
+# 第二层原因：脚本既没打印 skill_matched 事件，收尾摘要也不显示 skills_used ——
+# 与之前"告警设了却没打印"是同一类"机制做了但展示层藏起来"的漏。
+
+
+class _FakeSettings:
+    """鸭子类型的 settings：沙箱里装不上 pydantic_settings，装配逻辑必须可注入才能被测试。"""
+
+    llm_api_key = "sk-test"
+    llm_base_url = "http://localhost"
+    llm_model = "test-model"
+    llm_temperature = 0.0
+    llm_max_tokens = 8192
+    agent_max_steps = 3
+    agent_skill_top_k = 1
+    skills_dir = "skills"
+    github_token = ""
+    web_search_provider = "duckduckgo"
+    web_search_api_key = ""
+    tool_http_timeout_seconds = 1.0
+    tool_max_chars = 1000
+
+
+def test_demo_task_matches_a_builtin_skill() -> None:
+    """Demo 1 的任务文本必须真的命中内置技能，否则技能系统对这个主打场景等于不存在。"""
+    from agent_runtime.core.skill.router import SkillRouter
+    from agent_runtime.infrastructure.skills.catalog import register_skills_from_dir
+
+    module = _load()
+    router = SkillRouter()
+    errors = register_skills_from_dir(router, str(_ROOT / "skills"))
+    assert errors == [], errors
+
+    matched = router.match(module.build_task("fastapi/fastapi"), top_k=1)
+    assert [s.manifest.name for s in matched] == ["github_analysis"]
+
+
+def test_build_skill_router_loads_builtin_skills() -> None:
+    module = _load()
+    router = module.build_skill_router(_FakeSettings())
+    assert {m.name for m in router.list_all()} >= {"github_analysis", "tech_research"}
+
+
+def test_build_agent_wires_the_skill_router() -> None:
+    """核心回归：Demo 1 的 agent 跑真实任务后，skills_used **不能是空的**。
+
+    llm 注入 MockLLMProvider，所以这条端到端断言在沙箱内就能跑（不需要网络与 openai）。
+    """
+    import asyncio
+
+    from agent_runtime.core.llm.types import LLMResponse
+    from agent_runtime.infrastructure.llm.mock import MockLLMProvider
+
+    module = _load()
+    agent = module.build_agent(
+        settings=_FakeSettings(),
+        llm=MockLLMProvider([LLMResponse(content="报告：已分析")]),
+    )
+
+    assert agent.skills is not None, "ReActLoop 必须拿到 skill_router，否则技能永远不生效"
+    assert {m.name for m in agent.skills.list_all()} >= {"github_analysis"}
+
+    result = asyncio.run(agent.run(module.build_task("fastapi/fastapi")))
+    assert result.skills_used == ["github_analysis"], result.skills_used
+
+
+def test_build_agent_reports_the_skill_matched_event() -> None:
+    """`skill_matched` 事件必须真的发出来 —— 这正是本机实测中"看不到"的东西。"""
+    import asyncio
+
+    from agent_runtime.core.agent.events import AgentEventType
+    from agent_runtime.core.llm.types import LLMResponse
+    from agent_runtime.infrastructure.llm.mock import MockLLMProvider
+
+    module = _load()
+    agent = module.build_agent(
+        settings=_FakeSettings(),
+        llm=MockLLMProvider([LLMResponse(content="报告")]),
+    )
+
+    async def collect():
+        return [
+            ev async for ev in agent.run_stream(module.build_task("fastapi/fastapi"))
+        ]
+
+    events = asyncio.run(collect())
+    matched = [e for e in events if e.event_type == AgentEventType.SKILL_MATCHED]
+    assert matched, "Demo 1 必须发出 skill_matched 事件"
+    assert matched[0].data["skills"] == ["github_analysis"]
+
+
+def test_format_skills_is_empty_when_nothing_matched() -> None:
+    module = _load()
+    assert module.format_skills(None) == ""
+    assert module.format_skills([]) == ""
+
+
+def test_summary_shows_matched_skills() -> None:
+    import types
+
+    module = _load()
+
+    class FakeResult:
+        steps = [1]
+        total_tokens = types.SimpleNamespace(total_tokens=10)
+        total_latency_ms = 5
+        trace_id = "t1"
+        warning = None
+        skills_used = ["github_analysis"]
+
+    text = module.format_summary(FakeResult())
+    assert "github_analysis" in text, "用了哪个技能必须在收尾摘要里可见"
+
+
+def test_summary_omits_skills_line_when_none_matched() -> None:
+    import types
+
+    module = _load()
+
+    class FakeResult:
+        steps = [1]
+        total_tokens = types.SimpleNamespace(total_tokens=10)
+        total_latency_ms = 5
+        trace_id = "t2"
+        warning = None
+        skills_used = []
+
+    assert "命中技能" not in module.format_summary(FakeResult())
+
+
 def _run_all() -> None:
     tests = [
         v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)
