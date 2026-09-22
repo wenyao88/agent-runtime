@@ -130,6 +130,32 @@ def test_alembic_ini_has_no_hardcoded_password() -> None:
     assert "agent:agent" not in text
 
 
+# ── 编码：被外部工具按 locale 编码读的文件必须纯 ASCII ──
+#
+# 本机实测（用户机器，Windows 中文 locale=GBK）：`alembic upgrade head` 直接崩在
+#   UnicodeDecodeError: 'gbk' codec can't decode byte 0xb2 in position 96
+# 根因：Alembic 用 `configparser.read(path, encoding="locale")` 读 `alembic.ini`，
+# 而我在里面写了中文注释（文件是 UTF-8）→ 中文 Windows 上按 GBK 解码就炸。
+# 这类文件**必须保持纯 ASCII**：注释用英文，中文放 `.py`/`.md`（那些按 UTF-8 读）。
+#
+# Mako 模板同理：它由 Mako 自己的读取逻辑载入，编码行为不如显式 UTF-8 可靠，一并钉死。
+
+
+def test_alembic_ini_is_ascii_only() -> None:
+    raw = ALEMBIC_INI.read_bytes()
+    offender = next((i for i, b in enumerate(raw) if b > 127), None)
+    assert offender is None, (
+        f"alembic.ini 第 {offender} 字节非 ASCII：Alembic 按 locale 编码读它，"
+        "中文 Windows（GBK）上会 UnicodeDecodeError。请把注释改成英文。"
+    )
+
+
+def test_mako_template_is_ascii_only() -> None:
+    raw = (_ROOT / "alembic" / "script.py.mako").read_bytes()
+    offender = next((i for i, b in enumerate(raw) if b > 127), None)
+    assert offender is None, f"script.py.mako 第 {offender} 字节非 ASCII"
+
+
 def _run_all() -> None:
     failed = []
     for name, fn in sorted(globals().items()):
