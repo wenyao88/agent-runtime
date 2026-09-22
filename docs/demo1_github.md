@@ -1,0 +1,80 @@
+# Demo 1：GitHub Repository Analysis Agent
+
+> 本文档说明 Demo 1 验证了什么、怎么跑、以及当前**尚未验证**的部分。
+
+## 1. 这个 Demo 要证明什么
+
+它验证 Phase 2 的能力链在真实仓库上是否闭环：
+
+```
+ReAct Loop → Function Calling → Tool Registry → 4 个 GitHub 工具 → 结构化分析报告
+```
+
+具体能力点：
+
+| 能力 | 在 Demo 1 中如何体现 |
+|---|---|
+| ReAct 循环 | 先看仓库信息 → 再看目录 → 再读关键文件 → 最后产出报告 |
+| Function Calling | 模型通过 JSON Schema 选择工具并给出参数（`repo` / `path` / `ref`） |
+| Tool Registry | 8 个原生工具统一注册，模型只看到 `name` + `description` + `parameters` |
+| **工具错误恢复** | 读不存在的文件、目录当成文件读、超限文件 → 都变成可读 observation，模型自行纠正 |
+| Context 压缩 | 长任务触发 SQUEEZE / TRUNCATE，Trace 里能看到压缩事件 |
+| Trace | 每步记录 thought / tool_call / tool_result / compaction，带 trace_id |
+
+## 2. 前置条件
+
+```bash
+cp .env.example .env
+# 必填：LLM_API_KEY（硅基流动 / DeepSeek / Qwen / GLM 任一 OpenAI 兼容端点）
+# 建议：GITHUB_TOKEN —— 不填也能跑（公开只读接口），但：
+#   * 未鉴权时限流严格（60 次/小时），推荐填上；
+#   * github_search_code **必须**有 token（该接口未鉴权必然 401，工具会直接返回可读错误）。
+pip install -e ".[dev]"
+```
+
+## 3. 运行
+
+```bash
+python scripts/run_demo1_github.py --repo fastapi/fastapi
+python scripts/run_demo1_github.py --repo pallets/flask --focus "错误处理与重试"
+```
+
+输出形如：
+
+```
+任务：分析 GitHub 仓库 fastapi/fastapi，给出一份结构化报告：...
+
+── Step 1 ──
+💭 先获取仓库的基本信息。
+🔧 github_get_repo{"repo": "fastapi/fastapi"}
+📋 [成功 412ms] repo: fastapi/fastapi
+description: FastAPI framework, high performance...
+...
+
+✨ 最终报告：
+（项目用途 / 技术栈 / 目录结构要点 / 改进建议）
+```
+
+## 4. 建议观察的点（面试时可讲）
+
+1. **模型何时选择哪个工具**：它是否会先用 `github_get_repo` 建立全局认识，再 `github_list_dir`，最后 `github_read_file` 精读——这正是 Tool Selection 能力的体现。
+2. **错误是如何被吸收的**：故意让它读一个不存在的文件（或用 `--focus` 引导），可以看到失败结果被写回上下文后模型改变策略，而不是整个任务崩掉。
+3. **token 与步数**：结尾会打印步数 / token / 耗时 / trace_id，这些正是 Phase 6 Benchmark 要批量统计的量。
+
+## 5. 当前限制（诚实清单）
+
+| 限制 | 说明 |
+|---|---|
+| 真实 LLM 链路未在受限环境验证 | 开发沙箱没有 pip / httpx / openai，只能验证到"缺依赖 → 可读错误"这一层；真实调用需要在你机器上跑一次 |
+| `github_search_code` 需要 token | 未配置 token 时工具**不发起请求**直接返回可读错误（该接口未鉴权必然 401） |
+| 只支持公开仓库 | 未实现鉴权私有仓库的完整流程 |
+| 远程 PDF 不支持 | `pdf_read` 目前只读工作区内的本地文件（远程 PDF 需要二进制响应支持） |
+| 无 UI 流式对话的持久化 | Trace 目前是内存态，PostgreSQL 持久化在 Phase 4 |
+
+## 6. 无 API Key 也能看的效果
+
+```bash
+python scripts/run_demo_mock.py
+```
+
+用脚本化假模型驱动同一条 ReAct 链路（思考 → 调工具 → 观察 → 纠错 → 最终答案），不需要任何 key，适合快速确认代码跑得通。
