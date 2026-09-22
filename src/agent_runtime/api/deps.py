@@ -45,7 +45,13 @@ def get_memory_manager() -> MemoryManager:
 
 
 def get_context_manager() -> ContextManager:
-    return ContextManager(budget=TokenBudget())
+    settings = get_settings()
+    return ContextManager(
+        budget=TokenBudget(
+            model_max_tokens=settings.llm_max_tokens,
+            compaction_ratio=settings.agent_context_compaction_threshold,
+        )
+    )
 
 
 def get_skill_router() -> SkillRouter:

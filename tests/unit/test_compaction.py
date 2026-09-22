@@ -214,6 +214,17 @@ def test_auto_squeeze_escalates_to_truncate_when_still_over_budget() -> None:
     assert still_over is False
 
 
+def test_budget_compaction_ratio_is_configurable() -> None:
+    """`agent_context_compaction_threshold` 必须真的生效，而不是一条死配置。"""
+    tight = TokenBudget(
+        model_max_tokens=100, reserved_output=0, safety_margin=1.0, compaction_ratio=0.5
+    )
+    assert tight.available == 100
+    assert tight.compaction_threshold == 50
+    default = TokenBudget(model_max_tokens=100, reserved_output=0, safety_margin=1.0)
+    assert default.compaction_threshold == 80
+
+
 def _run_all() -> None:
     tests = [
         v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)

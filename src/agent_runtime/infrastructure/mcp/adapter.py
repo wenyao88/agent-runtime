@@ -24,6 +24,30 @@ def _brief(raw: Any, limit: int = 200) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+def _enum_values(raw: Any) -> list[Any] | None:
+    """保留枚举值的原始类型。
+
+    把数值枚举字符串化成 ["1","2","3"] 会直接降低参数精度（Tool Argument Accuracy 是
+    Benchmark 指标之一），也会让模型收到与类型不符的候选值。
+    """
+    if not isinstance(raw, list):
+        return None
+    out: list[Any] = []
+    for value in raw:
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            out.append(str(value))
+        else:
+            out.append(value)
+    return out
+
+
+def _number(raw: Any) -> float | None:
+    """接受 int 或 float 边界（JSON Schema 允许 0.5 这类小数）；bool 不算数字。"""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    return raw
+
+
 def _property_from_json(raw: Any, key: str) -> PropertyDef:
     if not isinstance(raw, dict):
         return PropertyDef(type="string", description=f"{key}: 无法解析的 schema 片段")
@@ -43,17 +67,14 @@ def _property_from_json(raw: Any, key: str) -> PropertyDef:
     if json_type == "array" and isinstance(raw.get("items"), dict):
         items = _property_from_json(raw["items"], f"{key}[]")
 
-    enum = raw.get("enum")
-    minimum = raw.get("minimum")
-    maximum = raw.get("maximum")
     return PropertyDef(
         type=json_type,
         description=str(raw.get("description") or ""),
-        enum=[str(v) for v in enum] if isinstance(enum, list) else None,
+        enum=_enum_values(raw.get("enum")),
         items=items,
         default=raw.get("default"),
-        minimum=minimum if isinstance(minimum, int) else None,
-        maximum=maximum if isinstance(maximum, int) else None,
+        minimum=_number(raw.get("minimum")),
+        maximum=_number(raw.get("maximum")),
     )
 
 

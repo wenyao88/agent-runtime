@@ -9,11 +9,11 @@ from typing import Any
 class PropertyDef:
     type: str = "string"
     description: str = ""
-    enum: list[str] | None = None
+    enum: list[Any] | None = None
     items: PropertyDef | None = None  # type="array" 时的元素定义
     default: Any = None
-    minimum: int | None = None
-    maximum: int | None = None
+    minimum: float | None = None
+    maximum: float | None = None
 
     def to_json_schema(self) -> dict:
         """只输出已设置的键（None 与空 description 不落盘），保持生成结果干净。"""

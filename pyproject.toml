@@ -9,6 +9,7 @@ dependencies = [
     "pydantic-settings>=2.7",
     "httpx>=0.28",
     "openai>=1.58",
+    "pypdf>=5.1",
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.30",
     "redis>=5.2",

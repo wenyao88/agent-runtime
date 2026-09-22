@@ -67,24 +67,41 @@ def test_chat_and_ws_smoke() -> None:
     from agent_runtime.api import deps as deps_mod
     from agent_runtime.api.app import app
 
-    # ── REST: POST /api/chat ──
     agent = _build_agent()
     app.dependency_overrides[deps_mod.get_agent_dep] = lambda: agent
+
+    # 把 MCP 配置指向不存在的文件：lifespan 照常执行，但不会 spawn 任何 server
+    settings = deps_mod.get_settings()
+    original_mcp_file = settings.mcp_servers_file
+    settings.mcp_servers_file = "/definitely/not/here.json"
+
+    import agent_runtime.api.ws.agent as ws_mod
+
+    original_ws_get_agent = ws_mod.get_agent
+    ws_mod.get_agent = _build_agent
     try:
-        client = TestClient(app)
-        resp = client.post("/api/chat", json={"task": "读取 计划.md"})
-        assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert body["final_answer"] == "最终答案：已读取", body
-        assert body["steps"] >= 1, body
-        assert body["total_tokens"]["total"] >= 0, body
+        # with 形式才会真正执行 lifespan（MCP 发现）
+        with TestClient(app) as client:
+            # ── REST: POST /api/chat ──
+            resp = client.post("/api/chat", json={"task": "读取 计划.md"})
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert body["final_answer"] == "最终答案：已读取", body
+            assert body["steps"] >= 1, body
+            assert body["total_tokens"]["total"] >= 0, body
 
-        # ── WebSocket: /ws/agent/{session_id} ──
-        import agent_runtime.api.ws.agent as ws_mod
+            # ── REST: GET /api/tools（原生工具目录）──
+            tools_resp = client.get("/api/tools")
+            assert tools_resp.status_code == 200, tools_resp.text
+            catalog = tools_resp.json()
+            assert catalog["count"] == len(catalog["tools"])
+            names = {t["name"] for t in catalog["tools"]}
+            assert {"read_file", "github_get_repo", "web_search", "pdf_read"} <= names, names
+            sample = next(t for t in catalog["tools"] if t["name"] == "read_file")
+            assert sample["parameters"]["required"] == ["path"]
+            assert app.state.mcp_errors == [], "未配置 MCP 时不应产生错误"
 
-        original = ws_mod.get_agent
-        ws_mod.get_agent = _build_agent
-        try:
+            # ── WebSocket: /ws/agent/{session_id} ──
             with client.websocket_connect("/ws/agent/test-session") as ws:
                 ws.send_json({"type": "task", "task": "读取 计划.md"})
                 frames = []
@@ -93,15 +110,15 @@ def test_chat_and_ws_smoke() -> None:
                     frames.append(frame)
                     if frame["event_type"] == "done":
                         break
-        finally:
-            ws_mod.get_agent = original
 
-        assert frames[-1]["data"]["final_answer"] == "最终答案：已读取", frames[-1]
-        assert any(f["event_type"] == "final_answer" for f in frames), frames
-        assert any(
-            f["event_type"] == "tool_result" and f["data"]["success"] for f in frames
-        ), frames
+            assert frames[-1]["data"]["final_answer"] == "最终答案：已读取", frames[-1]
+            assert any(f["event_type"] == "final_answer" for f in frames), frames
+            assert any(
+                f["event_type"] == "tool_result" and f["data"]["success"] for f in frames
+            ), frames
     finally:
+        ws_mod.get_agent = original_ws_get_agent
+        settings.mcp_servers_file = original_mcp_file
         app.dependency_overrides.clear()
 
     print("PASS test_chat_and_ws_smoke")

@@ -103,8 +103,9 @@ _RUNNERS = {"duckduckgo": _run_duckduckgo, "tavily": _run_tavily}
 class WebSearchTool(HttpToolBase):
     name = "web_search"
     description = (
-        "搜索互联网，返回标题/链接/摘要列表。默认用 DuckDuckGo（无需 key），"
-        "可通过 provider=tavily 切换到 Tavily（需要 key）。"
+        "搜索互联网，返回标题/链接/摘要列表。默认使用 DuckDuckGo 的 Instant Answer 接口："
+        "免 key，但只覆盖实体/主题摘要，**不是通用网页搜索**（冷门主题可能返回空）；"
+        "把 WEB_SEARCH_PROVIDER 配成 tavily 并填 key 后可获得通用网页结果。"
     )
     parameters = ToolSchema(
         properties={
@@ -130,7 +131,12 @@ class WebSearchTool(HttpToolBase):
                 f"未知的搜索 provider：{self.provider!r}；可选：{', '.join(sorted(_RUNNERS))}"
             )
 
-        top_k = max(1, min(int(max_results or 5), 10))
+        raw = 5 if max_results is None else max_results
+        try:
+            requested = int(raw)
+        except (TypeError, ValueError):
+            return self._err(f"max_results 必须是整数，收到 {max_results!r}")
+        top_k = max(1, min(requested, 10))
         items, error = await runner(self, query.strip(), top_k)
         if error:
             return self._err(error)

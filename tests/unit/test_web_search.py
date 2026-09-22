@@ -127,6 +127,15 @@ def test_schema_declares_query_required_and_bounds() -> None:
     assert params["properties"]["max_results"]["maximum"] == 10
 
 
+def test_non_numeric_max_results_is_readable() -> None:
+    """工具契约：execute 永不抛异常（审查发现此处会抛 ValueError）。"""
+    client = FakeClient()
+    result = asyncio.run(WebSearchTool(client=client).execute(query="x", max_results="abc"))
+    assert result.success is False
+    assert "max_results" in result.text
+    assert client.calls == [], "参数非法时不应发起请求"
+
+
 def _run_all() -> None:
     tests = [
         v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)

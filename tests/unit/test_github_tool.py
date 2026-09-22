@@ -183,6 +183,20 @@ def test_403_without_token_hints_at_token() -> None:
     assert "GITHUB_TOKEN" in result.text
 
 
+def test_read_file_url_encodes_path() -> None:
+    """文件名含空格/中文时必须 URL 编码，否则请求 URL 直接坏掉。"""
+    client = FakeClient(
+        {"api.github.com/repos/a/b/contents": FakeResponse(200, _file_json("hi"))}
+    )
+    result = __import__("asyncio").run(
+        GitHubReadFileTool(client=client).execute(repo="a/b", path="docs/My Notes.md")
+    )
+    assert result.success is True
+    url = client.calls[0][1]
+    assert "My%20Notes.md" in url, url
+    assert " " not in url, url
+
+
 # ── 注册与 schema ──
 
 

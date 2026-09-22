@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -48,9 +49,15 @@ class MCPServerConfig:
 class StdioTransport:
     """真实 stdio 传输：起子进程 + 逐行 JSON-RPC 2.0（MCP 的 stdio 线格式）。"""
 
-    def __init__(self, cfg: MCPServerConfig, timeout: float = 20.0) -> None:
+    def __init__(
+        self,
+        cfg: MCPServerConfig,
+        timeout: float = 20.0,
+        close_grace: float = 2.0,
+    ) -> None:
         self._cfg = cfg
         self._timeout = timeout
+        self._close_grace = close_grace
         self._proc: asyncio.subprocess.Process | None = None
         self._request_id = 0
 
@@ -64,7 +71,9 @@ class StdioTransport:
             *self._cfg.args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            # DEVNULL 而不是 PIPE：没人读 stderr 时，子进程写满管道缓冲区就会永久阻塞。
+            # ponytail: 代价是拿不到子进程的报错输出；需要诊断时改为后台读取任务。
+            stderr=asyncio.subprocess.DEVNULL,
             env=env,
         )
 
@@ -76,33 +85,54 @@ class StdioTransport:
         await proc.stdin.drain()
 
     async def request(self, method: str, params: Any = None) -> dict:
+        """发送 JSON-RPC 请求，并**按 id 匹配**响应。
+
+        真实 server 会在响应之间穿插 `notifications/*`，也可能往 stdout 打日志，所以绝不能
+        "取下一行当结果"：必须跳过通知 / 非 JSON / 别的 id，直到拿到自己的响应。
+        否则会出现"本次调用返回上一次的结果"这类静默错位（错的还被当成 success=True）。
+        """
         proc = self._proc
         if proc is None or proc.stdout is None:
             raise MCPError("transport 尚未启动")
         self._request_id += 1
+        request_id = self._request_id
         await self._write(
             {
                 "jsonrpc": "2.0",
-                "id": self._request_id,
+                "id": request_id,
                 "method": method,
                 "params": params if params is not None else {},
             }
         )
-        try:
-            line = await asyncio.wait_for(proc.stdout.readline(), timeout=self._timeout)
-        except asyncio.TimeoutError:
-            raise MCPError(f"{method} 超时（{self._timeout}s）") from None
-        if not line:
-            raise MCPError(f"{method} 失败：server 已关闭 stdout")
-        try:
-            message = json.loads(line.decode("utf-8", errors="replace"))
-        except ValueError as e:
-            raise MCPError(f"{method} 返回了非 JSON 内容：{e}") from None
-        if isinstance(message, dict) and message.get("error"):
-            error = message["error"] or {}
-            raise MCPError(f"{method} 出错：{error.get('code')} {error.get('message')}")
-        result = message.get("result") if isinstance(message, dict) else None
-        return result if isinstance(result, dict) else {}
+
+        deadline = time.monotonic() + self._timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise MCPError(
+                    f"{method} 超时（{self._timeout}s，未收到 id={request_id} 的响应）"
+                )
+            try:
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
+            except asyncio.TimeoutError:
+                raise MCPError(
+                    f"{method} 超时（{self._timeout}s，未收到 id={request_id} 的响应）"
+                ) from None
+            if not line:
+                raise MCPError(f"{method} 失败：server 已关闭 stdout")
+            try:
+                message = json.loads(line.decode("utf-8", errors="replace"))
+            except ValueError:
+                continue  # server 打到 stdout 的日志行 → 跳过
+            if not isinstance(message, dict) or "id" not in message:
+                continue  # 通知（notifications/*）→ 跳过
+            if message["id"] != request_id:
+                continue  # 上一次超时请求的迟到响应 → 跳过，不能污染本次结果
+            if message.get("error"):
+                error = message["error"] or {}
+                raise MCPError(f"{method} 出错：{error.get('code')} {error.get('message')}")
+            result = message.get("result")
+            return result if isinstance(result, dict) else {}
 
     async def notify(self, method: str, params: Any = None) -> None:
         await self._write(
@@ -110,15 +140,33 @@ class StdioTransport:
         )
 
     async def close(self) -> None:
+        """terminate → 有界等待 → kill。
+
+        只 terminate 不 wait 会留下僵尸/孤儿进程（每次热重载多一个），所以必须有 kill 兜底。
+        """
         proc, self._proc = self._proc, None
         if proc is None:
             return
         try:
             if proc.stdin is not None and not proc.stdin.is_closing():
                 proc.stdin.close()
-            if proc.returncode is None:
-                proc.terminate()
-        except (ProcessLookupError, RuntimeError):
+        except (ProcessLookupError, RuntimeError, AttributeError):
+            pass
+
+        if proc.returncode is not None:
+            return
+        try:
+            proc.terminate()
+        except (ProcessLookupError, RuntimeError, AttributeError):
+            return
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=self._close_grace)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except (ProcessLookupError, RuntimeError, AttributeError):
+                pass
+        except (ProcessLookupError, RuntimeError, AttributeError):
             pass
 
 
@@ -295,10 +343,16 @@ async def bootstrap_mcp(
     —— MCP 是可选能力，绝不能阻断启动。
     client 由调用方持有：lifespan 需要在关闭时 aclose() 它，否则子进程会泄漏。
     """
-    servers = [cfg for cfg in load_mcp_servers(servers_file) if cfg.enabled]
+    configured = [cfg for cfg in load_mcp_servers(servers_file) if cfg.enabled]
+    errors: list[str] = [
+        f"{cfg.name}: 暂不支持的 transport={cfg.transport!r}（当前仅实现 stdio）"
+        for cfg in configured
+        if cfg.transport != "stdio"
+    ]
+    servers = [cfg for cfg in configured if cfg.transport == "stdio"]
     if not servers:
-        return [], []
+        return [], errors
     for cfg in servers:
         await client.connect(cfg)
     names = await client.discover_tools(registry)
-    return names, list(client.last_errors)
+    return names, errors + list(client.last_errors)

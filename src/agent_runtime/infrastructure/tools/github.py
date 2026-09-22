@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import binascii
 from typing import Any
+from urllib.parse import quote
 
 from ...core.tool.base import PropertyDef, ToolResult, ToolSchema
 from ...core.tool.registry import ToolRegistry
@@ -41,7 +42,12 @@ class _GitHubToolBase(HttpToolBase):
         return headers
 
     async def _github(self, path: str, **kw: Any) -> HttpOutcome:
-        outcome = await self._get(f"{self._base_url}{path}", headers=self._headers(), **kw)
+        # 路径必须 URL 编码（safe="/" 保留分隔符）：文件名里的空格 / # / ? / 中文
+        # 不编码会直接破坏请求 URL。
+        encoded_path = quote(path, safe="/")
+        outcome = await self._get(
+            f"{self._base_url}{encoded_path}", headers=self._headers(), **kw
+        )
         if not outcome.ok and outcome.status in (401, 403) and not self._token:
             return HttpOutcome(
                 ok=False,

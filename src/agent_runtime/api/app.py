@@ -16,7 +16,10 @@ def create_app() -> FastAPI:
         from .deps import get_settings, get_tool_registry
 
         settings = get_settings()
-        mcp = MCPClient(timeout=float(settings.tool_http_timeout_seconds))
+        mcp = MCPClient(
+            timeout=float(settings.tool_http_timeout_seconds),
+            max_chars=settings.tool_max_chars,
+        )
         try:
             names, errors = await bootstrap_mcp(
                 get_tool_registry(), settings.mcp_servers_file, mcp

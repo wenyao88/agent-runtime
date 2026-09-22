@@ -267,7 +267,6 @@ def test_real_stdio_transport_fails_readably_when_spawn_denied() -> None:
         return
     assert client.last_errors, "spawn 失败必须被记录"
     assert any("real" in e for e in client.last_errors)
-    assert isinstance(StdioTransport(cfg), StdioTransport)
 
 
 # ── 配置文件加载 ──
@@ -356,6 +355,177 @@ def test_bootstrap_records_connect_failure_without_raising() -> None:
         assert names == []
         assert registry.list_all() == []
         assert any("broken" in e for e in errors), "连接失败必须被记录，而不是静默"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# ── 真实 stdio 传输的帧匹配与关闭流程（审查发现 C1/I3）──
+
+
+class FakeStdin:
+    def __init__(self) -> None:
+        self.written: list[bytes] = []
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        self.written.append(data)
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+    def is_closing(self) -> bool:
+        return self.closed
+
+
+class FakeStdout:
+    def __init__(self, lines: list[bytes]) -> None:
+        self.lines = list(lines)
+
+    async def readline(self) -> bytes:
+        return self.lines.pop(0) if self.lines else b""
+
+
+class FakeProc:
+    """假子进程：只实现协议匹配与关闭流程所需的最小面。"""
+
+    def __init__(
+        self,
+        lines: list[bytes] | None = None,
+        never_exits: bool = False,
+        returncode: int | None = None,
+    ) -> None:
+        self.stdin = FakeStdin()
+        self.stdout = FakeStdout(lines or [])
+        self.stderr = None
+        self.returncode = returncode
+        self.never_exits = never_exits
+        self.terminated = 0
+        self.killed = 0
+
+    def terminate(self) -> None:
+        self.terminated += 1
+
+    def kill(self) -> None:
+        self.killed += 1
+        self.returncode = -9
+
+    async def wait(self):
+        if self.never_exits and not self.killed:
+            await asyncio.sleep(3600)
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+
+def _transport_with(lines: list[bytes], **kw) -> tuple[StdioTransport, FakeProc]:
+    transport = StdioTransport(MCPServerConfig(name="t", command="python"), timeout=1, **kw)
+    proc = FakeProc(lines)
+    transport._proc = proc
+    return transport, proc
+
+
+def test_stdio_transport_skips_notifications() -> None:
+    """真实 MCP server 会先发 notifications/*；不跳过就会吞掉真正的响应。"""
+    notification = (
+        b'{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info"}}\n'
+    )
+    response = b'{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"read_file"}]}}\n'
+    transport, _ = _transport_with([notification, response])
+    assert asyncio.run(transport.request("tools/list", {})) == {
+        "tools": [{"name": "read_file"}]
+    }
+
+
+def test_stdio_transport_ignores_non_json_log_lines() -> None:
+    transport, _ = _transport_with(
+        [b"[server] starting up\n", b'{"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n']
+    )
+    assert asyncio.run(transport.request("tools/call", {})) == {"ok": True}
+
+
+def test_stdio_transport_skips_late_response_for_earlier_request() -> None:
+    """超时请求的迟到响应不能污染下一次调用。"""
+    transport, _ = _transport_with(
+        [
+            b'{"jsonrpc":"2.0","id":1,"result":{"late":true}}\n',
+            b'{"jsonrpc":"2.0","id":2,"result":{"current":true}}\n',
+        ]
+    )
+    transport._request_id = 1  # 模拟"上一次请求已用掉 id=1"
+    assert asyncio.run(transport.request("second", {})) == {"current": True}
+
+
+def test_stdio_transport_rejects_mismatched_id() -> None:
+    transport, _ = _transport_with([b'{"jsonrpc":"2.0","id":999,"result":{"ok":"WRONG"}}\n'])
+    try:
+        asyncio.run(transport.request("tools/call", {}))
+    except MCPError:
+        return
+    raise AssertionError("id 不匹配时绝不能把别人的响应当成本次结果")
+
+
+def test_stdio_transport_close_escalates_to_kill() -> None:
+    transport = StdioTransport(
+        MCPServerConfig(name="t", command="python"), timeout=1, close_grace=0.01
+    )
+    proc = FakeProc(never_exits=True)
+    transport._proc = proc
+    asyncio.run(transport.close())
+    assert proc.terminated == 1
+    assert proc.killed == 1, "等待超时后必须 kill，否则每次 reload 都会留下孤儿进程"
+
+
+def test_stdio_transport_close_skips_signals_for_exited_process() -> None:
+    transport = StdioTransport(MCPServerConfig(name="t", command="python"), timeout=1)
+    proc = FakeProc(returncode=0)
+    transport._proc = proc
+    asyncio.run(transport.close())
+    assert proc.terminated == 0 and proc.killed == 0
+
+
+# ── MCP schema 翻译的类型保真（审查发现 I4）──
+
+
+def test_adapter_preserves_numeric_enum_and_float_bounds() -> None:
+    adapter = MCPToolAdapter(
+        client=None,
+        server="s",
+        tool_info={
+            "name": "n",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "level": {"type": "integer", "enum": [1, 2, 3]},
+                    "ratio": {"type": "number", "minimum": 0.5, "maximum": 2.5},
+                },
+                "required": [],
+            },
+        },
+    )
+    props = adapter.to_openai_schema()["function"]["parameters"]["properties"]
+    assert props["level"]["enum"] == [1, 2, 3], "数值枚举不能被字符串化，否则参数精度下降"
+    assert props["ratio"]["minimum"] == 0.5
+    assert props["ratio"]["maximum"] == 2.5
+
+
+def test_bootstrap_reports_unsupported_transport_instead_of_trying_stdio() -> None:
+    """配置了未实现的 transport 时必须明说，而不是偷偷用 stdio 起一个空命令。"""
+    root = _new_root()
+    try:
+        path = Path(root) / "mcp_servers.json"
+        path.write_text(
+            json.dumps(
+                [{"name": "web", "transport": "streamable_http", "url": "https://x"}]
+            ),
+            encoding="utf-8",
+        )
+        registry = ToolRegistry()
+        names, errors = asyncio.run(bootstrap_mcp(registry, str(path), MCPClient()))
+        assert names == []
+        assert any("stdio" in e for e in errors), errors
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
