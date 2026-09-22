@@ -36,6 +36,19 @@ def build_task(repo: str, focus: str = "") -> str:
     return task
 
 
+def format_tool_result(result: str, max_lines: int = 8) -> str:
+    """按**行**展示工具结果；被截断时明确标注。
+
+    绝不要按字符数硬截断结构化结果：本机实测中 150 字符的硬截断恰好切在 star 数中间，
+    真实的 102528 显示成了 1025 —— 残缺内容看起来像完整内容，比不显示更糟。
+    """
+    text = result or ""
+    lines = text.splitlines()
+    if len(lines) <= max_lines:
+        return text
+    return "\n".join(lines[:max_lines]) + f"\n…（共 {len(lines)} 行，已截断）"
+
+
 def format_warning(warning: str | None) -> str:
     """把告警渲染成醒目的一行。
 
@@ -135,12 +148,14 @@ async def run(repo: str, focus: str) -> int:
         if kind == "step_start":
             print(f"\n── Step {data['step']} ──")
         elif kind == "thought" and data.get("content"):
-            print(f"💭 {str(data['content'])[:200]}")
+            thought = str(data["content"])
+            print(f"💭 {thought[:200]}{'…（已截断）' if len(thought) > 200 else ''}")
         elif kind == "tool_call":
             print(f"🔧 {data['tool']}{data['args']}")
         elif kind == "tool_result":
             flag = "成功" if data.get("success") else "失败"
-            print(f"📋 [{flag} {data.get('latency_ms', 0)}ms] {str(data.get('result', ''))[:150]}")
+            body = format_tool_result(str(data.get("result", "")))
+            print(f"📋 [{flag} {data.get('latency_ms', 0)}ms] {body}")
         elif kind == "compaction":
             print(f"⚡ 压缩 {data['before']} → {data['after']}（{data['strategy']}）")
         elif kind == "final_answer":

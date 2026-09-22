@@ -103,6 +103,36 @@ def test_summary_has_no_warning_marker_on_success() -> None:
     assert "⚠" not in text
 
 
+def test_tool_result_is_truncated_by_lines_and_marked() -> None:
+    """工具结果必须**按行**截断并明确标注。
+
+    本机实测踩过这个坑：按 150 字符硬截断恰好切在 star 数中间，
+    真实的 102528 显示成了 1025 —— 残缺内容被当成了完整内容。
+    """
+    module = _load()
+    many = "\n".join(f"line{i}" for i in range(10))
+    shown = module.format_tool_result(many, max_lines=3)
+    assert shown.startswith("line0\nline1\nline2")
+    assert "line3" not in shown
+    assert "已截断" in shown, "被截断必须明确标注"
+    assert "10" in shown, "应告知总行数"
+
+
+def test_tool_result_keeps_whole_numbers() -> None:
+    """核心回归：数字绝不能被切断。"""
+    module = _load()
+    text = "repo: fastapi/fastapi\nlanguage: Python\nstars: 102528\ndefault_branch: master"
+    shown = module.format_tool_result(text, max_lines=6)
+    assert shown == text
+    assert "102528" in shown and "1025\n" not in shown
+
+
+def test_tool_result_short_text_is_untouched() -> None:
+    module = _load()
+    assert module.format_tool_result("", max_lines=3) == ""
+    assert module.format_tool_result("only line", max_lines=3) == "only line"
+
+
 def _run_all() -> None:
     tests = [
         v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)
