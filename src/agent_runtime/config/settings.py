@@ -44,5 +44,10 @@ class Settings(BaseSettings):
     tool_http_timeout_seconds: float = 20.0
     tool_max_chars: int = 4000
 
+    # Skills（可选能力：目录缺失只记错误，不影响启动）
+    skills_dir: str = "skills"  # 相对路径按项目根解析（不按 CWD）
+    agent_skill_top_k: int = 1  # 每次最多注入几个命中的技能
+    agent_task_planning_enabled: bool = False  # TaskPlanner 默认关闭（额外一次 LLM 调用）
+
     # MCP（可选能力：文件缺失即视为不启用，不影响启动）
     mcp_servers_file: str = "mcp_servers.json"

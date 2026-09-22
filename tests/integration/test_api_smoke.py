@@ -101,6 +101,17 @@ def test_chat_and_ws_smoke() -> None:
             assert sample["parameters"]["required"] == ["path"]
             assert app.state.mcp_errors == [], "未配置 MCP 时不应产生错误"
 
+            # ── REST: GET /api/skills（内置技能目录）──
+            skills_resp = client.get("/api/skills")
+            assert skills_resp.status_code == 200, skills_resp.text
+            skills_body = skills_resp.json()
+            assert skills_body["count"] == len(skills_body["skills"])
+            loaded = {s["name"] for s in skills_body["skills"]}
+            assert {"github_analysis", "tech_research"} <= loaded, loaded
+            github = next(s for s in skills_body["skills"] if s["name"] == "github_analysis")
+            assert github["triggers"], github
+            assert app.state.skill_errors == [], app.state.skill_errors
+
             # ── WebSocket: /ws/agent/{session_id} ──
             with client.websocket_connect("/ws/agent/test-session") as ws:
                 ws.send_json({"type": "task", "task": "读取 计划.md"})

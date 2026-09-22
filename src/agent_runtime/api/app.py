@@ -13,7 +13,7 @@ def create_app() -> FastAPI:
         **绝不阻断启动** —— 否则一个坏配置就会让整个服务起不来。
         """
         from ..infrastructure.mcp.client import MCPClient, bootstrap_mcp
-        from .deps import get_settings, get_tool_registry
+        from .deps import get_settings, get_skill_errors, get_skill_router, get_tool_registry
 
         settings = get_settings()
         mcp = MCPClient(
@@ -30,6 +30,13 @@ def create_app() -> FastAPI:
         app.state.mcp_client = mcp
         app.state.mcp_tool_names = names
         app.state.mcp_errors = errors
+
+        # 技能：启动时加载一次（单例，与 Agent 共享同一批）。坏文件只记错误，不阻断启动。
+        try:
+            get_skill_router()
+            app.state.skill_errors = get_skill_errors()
+        except Exception as e:  # noqa: BLE001 —— 技能是可选能力，永不阻断启动
+            app.state.skill_errors = [f"skill 加载异常：{type(e).__name__}: {e}"]
 
         try:
             yield
@@ -49,11 +56,13 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     from .routes.chat import router as chat_router
+    from .routes.skills import router as skills_router
     from .routes.tools import router as tools_router
     from .ws.agent import router as ws_router
 
     app.include_router(chat_router)
     app.include_router(tools_router)
+    app.include_router(skills_router)
     app.include_router(ws_router)
 
     return app

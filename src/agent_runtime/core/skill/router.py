@@ -6,6 +6,12 @@ class SkillRouter:
         self._skills: list[BaseSkill] = []
 
     def register(self, skill: BaseSkill) -> None:
+        """按名字去重、保留第一个（与 ToolRegistry 的唯一性语义一致）。
+
+        重复装配（例如 lifespan 跑两次）若不去重，技能列表与注入内容都会翻倍。
+        """
+        if any(s.manifest.name == skill.manifest.name for s in self._skills):
+            return
         self._skills.append(skill)
 
     def match(self, task: str, top_k: int = 1) -> list[BaseSkill]:

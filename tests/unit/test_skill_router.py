@@ -125,6 +125,18 @@ def test_list_all_returns_manifests_in_registration_order() -> None:
     assert all(isinstance(m, SkillManifest) for m in manifests)
 
 
+def test_duplicate_name_is_ignored() -> None:
+    """同名技能只保留第一个：否则重复装配（如 lifespan 跑两次）会让技能列表与注入内容翻倍。
+
+    与 ToolRegistry 的去重语义一致（按名字唯一）。
+    """
+    router = SkillRouter()
+    router.register(FakeSkill("gh", ["代码审查"], body="FIRST"))
+    router.register(FakeSkill("gh", ["代码审查"], body="SECOND"))
+    assert len(router.list_all()) == 1
+    assert router.match("代码审查", top_k=5)[0].build_prompt_extension("t") == "FIRST"
+
+
 def _run_all() -> None:
     tests = [
         v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)
