@@ -1,9 +1,10 @@
-"""读取工作区内文本文件。路径逃逸一律拒绝；输出截断 4000 字符。"""
+"""读取工作区内文本文件。路径逃逸一律拒绝；输出按上下文上限截断。"""
 from __future__ import annotations
 
 import os
 
 from ...core.tool.base import BaseTool, PropertyDef, ToolResult, ToolSchema
+from ._common import resolve_within, truncate_for_context
 
 MAX_CHARS = 4000
 
@@ -20,18 +21,27 @@ class FileReaderTool(BaseTool):
         self._root = os.path.abspath(root)
 
     async def execute(self, path: str) -> ToolResult:
-        p = os.path.abspath(os.path.join(self._root, path))
-        if not (p == self._root or p.startswith(self._root + os.sep)):
-            return ToolResult(tool_name=self.name, success=False,
-                              text=f"Error: path escapes workspace root: {path!r}")
-        if not os.path.isfile(p):
-            return ToolResult(tool_name=self.name, success=False,
-                              text=f"Error: file not found: {path!r}")
+        target = resolve_within(self._root, path)
+        if target is None:
+            return ToolResult(
+                tool_name=self.name,
+                success=False,
+                text=f"Error: path escapes workspace root: {path!r}",
+            )
+        if not os.path.isfile(target):
+            return ToolResult(
+                tool_name=self.name, success=False, text=f"Error: file not found: {path!r}"
+            )
         try:
-            text = open(p, encoding="utf-8", errors="replace").read(MAX_CHARS + 1)
+            with open(target, encoding="utf-8", errors="replace") as fh:
+                text = fh.read(MAX_CHARS + 1)
         except OSError as e:
             return ToolResult(tool_name=self.name, success=False, text=f"Error: {e}")
-        truncated = len(text) > MAX_CHARS
-        out = text[:MAX_CHARS] + ("\n...[truncated]" if truncated else "")
-        return ToolResult(tool_name=self.name, success=True, text=out,
-                          data={"path": path, "chars": len(text), "truncated": truncated})
+
+        out, truncated = truncate_for_context(text, MAX_CHARS)
+        return ToolResult(
+            tool_name=self.name,
+            success=True,
+            text=out,
+            data={"path": path, "chars": len(text), "truncated": truncated},
+        )

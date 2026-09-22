@@ -14,8 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...core.tool.base import BaseTool, ToolResult
-
-TRUNCATED_SUFFIX = "\n...[truncated]"
+from ._common import truncate_for_context
 
 
 @dataclass
@@ -101,8 +100,7 @@ class HttpToolBase(BaseTool):
     # ── 结果构造 ──
 
     def _ok(self, text: str, data: Any = None) -> ToolResult:
-        truncated = len(text) > self._max_chars
-        out = text[: self._max_chars] + (TRUNCATED_SUFFIX if truncated else "")
+        out, truncated = truncate_for_context(text, self._max_chars)
         return ToolResult(
             tool_name=self.name,
             success=True,
