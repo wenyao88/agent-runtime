@@ -89,6 +89,7 @@ def test_chat_and_ws_smoke() -> None:
             assert body["final_answer"] == "最终答案：已读取", body
             assert body["steps"] >= 1, body
             assert body["total_tokens"]["total"] >= 0, body
+            assert body["skills_used"] == [], "未注入 skill_router 时不应报告任何技能"
 
             # ── REST: GET /api/tools（原生工具目录）──
             tools_resp = client.get("/api/tools")
@@ -123,6 +124,7 @@ def test_chat_and_ws_smoke() -> None:
                         break
 
             assert frames[-1]["data"]["final_answer"] == "最终答案：已读取", frames[-1]
+            assert frames[-1]["data"]["skills_used"] == [], frames[-1]
             assert any(f["event_type"] == "final_answer" for f in frames), frames
             assert any(
                 f["event_type"] == "tool_result" and f["data"]["success"] for f in frames

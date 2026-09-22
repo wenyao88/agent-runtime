@@ -22,4 +22,5 @@ async def chat(req: ChatRequest, agent: ReActLoop = Depends(get_agent_dep)) -> C
         total_latency_ms=result.total_latency_ms,
         trace_id=result.trace_id,
         warning=result.warning,
+        skills_used=result.skills_used,
     )

@@ -76,6 +76,13 @@ function Row({
 function EventRow({ ev }: { ev: AgentStreamEvent }) {
   const d = ev.data ?? {};
   switch (ev.event_type) {
+    case "skill_matched":
+      return (
+        <Row
+          icon={<Sparkles className="h-3.5 w-3.5 text-amber-500" />}
+          label={`命中技能：${(d.skills ?? []).join(", ") || "(无)"}`}
+        />
+      );
     case "step_start":
       return <Row icon={<Zap className="h-3.5 w-3.5 text-slate-400" />} label={`Step ${d.step}`} />;
     case "thought":

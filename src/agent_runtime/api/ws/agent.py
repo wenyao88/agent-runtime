@@ -31,6 +31,7 @@ async def agent_ws(ws: WebSocket, session_id: str) -> None:
                         "final_answer": last.final_answer if last else "",
                         "trace_id": last.trace_id if last else "",
                         "warning": last.warning if last else None,
+                        "skills_used": last.skills_used if last else [],
                     },
                 }
             )

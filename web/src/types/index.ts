@@ -1,5 +1,6 @@
 export type AgentStreamEvent = {
   event_type:
+    | "skill_matched"
     | "step_start"
     | "thought"
     | "tool_call"

@@ -49,7 +49,7 @@ curl -X POST http://localhost:8000/api/chat -H "Content-Type: application/json" 
 cd web && pnpm install && pnpm run dev   # http://localhost:5173
 ```
 
-Chat 页通过 `ws://localhost:8000/ws/agent/{session_id}` 接收 `step_start / thought / tool_call / tool_result / compaction / final_answer / done` 事件流，折叠卡片实时展示执行过程。
+Chat 页通过 `ws://localhost:8000/ws/agent/{session_id}` 接收 `skill_matched / step_start / thought / tool_call / tool_result / compaction / final_answer / done` 事件流，折叠卡片实时展示执行过程。
 
 ## 内置工具（8 个原生工具 + 任意 MCP 工具）
 
@@ -85,6 +85,53 @@ Chat 页通过 `ws://localhost:8000/ws/agent/{session_id}` 接收 `step_start / 
 **MCP 是可选能力**：配置文件缺失/损坏、或某个 server 起不来，只在 `app.state.mcp_errors`
 里记录，**绝不阻断启动**。
 
+## Skills：领域 SOP（Markdown 定义）
+
+技能 = 一段**领域操作流程**（SOP）。启动时从 `skills/*.md` 加载，按任务关键词命中后，把正文**追加**进
+System Prompt —— Agent 面对"仓库分析"或"技术调研"时按固定套路走，而不是每次从零思考。
+
+内置两个技能：`skills/github_analysis.md`（GitHub 仓库分析）、`skills/tech_research.md`（技术调研）。
+
+### 新增一个技能
+
+在 `skills/` 下建一个 `.md`，front-matter + 正文即可（**不需要改代码**）：
+
+```markdown
+---
+name: my_skill
+description: 一句话说明这个 SOP 干什么
+version: "1.0"
+triggers: [关键词A, 关键词B, english keyword]
+required_tools: [read_file, web_search]
+tags: [code]
+---
+
+# 正文就是注入 System Prompt 的技能指导
+1. 第一步做什么……
+```
+
+支持**有限**的 front-matter 子集：标量、`[a, b]`、`- item` 列表。嵌套映射、锚点、多行字符串
+**不支持**——遇到就明确报错并跳过该文件（不猜）。`name` / `description` 必填，未知键忽略（向前兼容）。
+
+### 命中规则与可见性
+
+- **打分**：命中的 trigger **个数**，降序取前 `AGENT_SKILL_TOP_K`（默认 1）个；同分按加载顺序。
+  纯关键词子串匹配（大小写无关），**不是**语义匹配。
+- **无命中就不注入**：宁可不用技能，也不注入一个不相关的 SOP。
+- **注入顺序（安全边界）**：技能文本**只能追加**在 `DEFAULT_SYSTEM_PROMPT` 的硬规则**之后** —— 技能是"内容"，
+  防幻觉规则是"底线"，内容不得改写底线（有测试钉死）。
+- **怎么知道这次用了哪个技能**：`AgentResult.skills_used`、`skill_matched` 事件、trace session 的
+  `config["skills"]`，以及 `GET /api/skills`（列出当前已加载的技能）。
+
+### TaskPlanner（可选，默认关闭）
+
+`AGENT_TASK_PLANNING_ENABLED=true` 时，任务开始前多花一次 LLM 调用产出**计划文本**，同样追加进 System Prompt。
+
+- **天花板（明确标注）**：计划只是"参考文本"，**不保证逐子任务执行** —— ReAct 控制流没有改动，
+  模型可能不完全按计划走。升级路径是结构化 `TaskPlan` + 逐子任务循环（会改动 Trace 语义，需先验证收益）。
+- **失败即降级**：规划 LLM 报错/返回空 → 不注入任何计划文本，主任务照常跑。
+- **技能与坏文件都不会阻断启动**：加载错误只记在 `app.state.skill_errors` 里。
+
 ## Demo 1：GitHub 仓库分析
 
 ```bash
@@ -92,7 +139,7 @@ python scripts/run_demo1_github.py --repo fastapi/fastapi
 python scripts/run_demo1_github.py --repo pallets/flask --focus "错误处理与重试"
 ```
 
-详见 `docs/demo1_github.md`。
+详见 `docs/demo1_github.md`；Demo 2（技术调研）骨架见 `docs/demo2_research.md`。
 
 ## 输出可信度（防幻觉）
 
@@ -127,14 +174,14 @@ python tests/unit/test_mcp_client.py
 
 覆盖范围：ReAct 循环 / 工具契约与 schema / HTTP 工具基座 / GitHub・搜索・抓取・PDF 四个工具 /
 MCP 客户端与 schema 翻译 / 上下文压缩（SQUEEZE・TRUNCATE・策略升级）/ 工具装配 /
-Demo 脚本契约 / API 冒烟（无 fastapi 时自动 SKIP）。
+Skill 加载・打分路由・内置技能・装配 / TaskPlanner / Demo 脚本契约 / API 冒烟（无 fastapi 时自动 SKIP）。
 
 ## Roadmap
 
 - [x] Phase 0 骨架：全接口 + 数据类 + FastAPI 空壳 + 前端空壳
 - [x] Phase 1 ReAct 最小闭环：LLM Provider + ReActLoop + FileReaderTool + chat/ws + ChatPage
 - [x] Phase 2 Tool 生态 + MCP Client：8 个原生工具 + MCP Client/Adapter + SQUEEZE/TRUNCATE 压缩 + `GET /api/tools`
-- [ ] Phase 3 Skill + TaskPlanner
+- [x] Phase 3 Skill + TaskPlanner：Markdown 技能加载 + 关键词打分路由 + 2 个内置技能 + TaskPlanner（默认关）+ `GET /api/skills`
 - [ ] Phase 4 Memory 持久化 (Redis + pgvector)
 - [ ] Phase 5 Compaction 完整版 (SUMMARIZE)
 - [ ] Phase 6 Benchmark 系统
