@@ -147,7 +147,18 @@ def test_query_uses_cosine_distance_and_limit() -> None:
     assert "<=>" in sql, "必须用余弦距离排序（与 ivfflat vector_cosine_ops 索引一致）"
     assert "ORDER BY" in sql.upper()
     assert "LIMIT" in sql.upper()
-    assert params["k"] == 4 and len(params["vec"]) == DIM
+    assert params["k"] == 4
+    assert isinstance(params["vec"], str), "必须绑 pgvector 文本字面量，而不是 Python list（asyncpg 需要编解码器）"
+    assert params["vec"].startswith("[") and params["vec"].endswith("]")
+    assert params["vec"].count(",") == DIM - 1
+
+
+def test_store_binds_vector_as_text_literal() -> None:
+    """最高未验证风险的回归：绑 list 需要 asyncpg 的 vector 编解码器（本仓库未注册），绑文本字面量则不需要。"""
+    session = FakeSession(scalar="id-1")
+    _run(_mem(session).store(MemoryEntry(content="x")))
+    bound = session.executed[0][1]["vec"]
+    assert isinstance(bound, str) and bound.startswith("[") and bound.endswith("]")
 
 
 def test_query_maps_rows_to_entries() -> None:

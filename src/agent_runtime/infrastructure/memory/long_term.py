@@ -30,6 +30,17 @@ class EmbeddingDimMismatch(Exception):
     """向量维度与表定义不一致（通常是换了 embedding 模型但没迁移）。"""
 
 
+def _vector_literal(vector: list[float]) -> str:
+    """把向量绑成 **pgvector 的文本字面量** `[0.1,0.2,…]`，而不是 Python list。
+
+    为什么（Phase 4 审查标为最高未验证风险）：asyncpg 要注册 vector 编解码器（`register_vector`）才能直接收 list，
+    而本仓库没有这个调用 —— 若它拒绝 list，`store`/`query` 会全部失败并被逐层 try 吞掉，
+    表现为"长期记忆静默失效"。`CAST(:vec AS vector)` 本身就能吃文本字面量，
+    所以绑字符串可以**彻底去掉这个隐式前提**，不依赖任何编解码器。
+    """
+    return "[" + ",".join(repr(float(x)) for x in vector) + "]"
+
+
 def _row_get(row: Any, key: str, default: Any = None) -> Any:
     """兼容 dict 行与 SQLAlchemy Row（`._mapping`）。"""
     if isinstance(row, dict):
@@ -139,7 +150,7 @@ class PostgresLongTermMemory(BaseMemory):
             "content": entry.content,
             "role": entry.role,
             "meta": json.dumps(entry.metadata or {}, ensure_ascii=False, default=str),
-            "vec": vector,
+            "vec": _vector_literal(vector),
             "session_id": normalize_session_id(entry.metadata.get("session_id")),
         }
         async with self._session_factory() as session:
@@ -165,7 +176,9 @@ class PostgresLongTermMemory(BaseMemory):
             "LIMIT :k"
         )
         async with self._session_factory() as session:
-            result = await session.execute(self._stmt(sql), {"vec": vector, "k": int(query.top_k)})
+            result = await session.execute(
+                self._stmt(sql), {"vec": _vector_literal(vector), "k": int(query.top_k)}
+            )
             rows = list(result.fetchall())
 
         entries: list[MemoryEntry] = []
