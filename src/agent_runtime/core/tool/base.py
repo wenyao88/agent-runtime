@@ -31,7 +31,16 @@ class ToolResult:
 class BaseTool(ABC):
     name: str = ""
     description: str = ""
-    parameters: ToolSchema = field(default_factory=ToolSchema)
+
+    # 默认空 schema。这里必须是真正的 ToolSchema 实例：BaseTool 不是 dataclass，
+    # 用 field(default_factory=...) 只会留下一个 dataclasses.Field 对象，让未声明
+    # parameters 的工具在 to_openai_schema() 时崩掉。
+    # ponytail: 每次访问新建实例（避免可变默认值跨实例共享）；天花板是默认 schema 上的
+    # 原地修改不会保留 —— 需要可变 schema 的工具应像 FileReaderTool 那样显式声明
+    # parameters 类属性（子类类属性会遮蔽本 property）。
+    @property
+    def parameters(self) -> ToolSchema:
+        return ToolSchema()
 
     @abstractmethod
     async def execute(self, **kwargs) -> ToolResult: ...
