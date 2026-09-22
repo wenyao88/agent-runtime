@@ -13,7 +13,14 @@ def create_app() -> FastAPI:
         **绝不阻断启动** —— 否则一个坏配置就会让整个服务起不来。
         """
         from ..infrastructure.mcp.client import MCPClient, bootstrap_mcp
-        from .deps import get_settings, get_skill_errors, get_skill_router, get_tool_registry
+        from .deps import (
+            get_memory_errors,
+            get_memory_manager,
+            get_settings,
+            get_skill_errors,
+            get_skill_router,
+            get_tool_registry,
+        )
 
         settings = get_settings()
         mcp = MCPClient(
@@ -38,6 +45,13 @@ def create_app() -> FastAPI:
         except Exception as e:  # noqa: BLE001 —— 技能是可选能力，永不阻断启动
             app.state.skill_errors = [f"skill 加载异常：{type(e).__name__}: {e}"]
 
+        # 记忆：只做装配（不连接，避免启动阻塞）。缺依赖/缺 key 只记错误，不阻断启动。
+        try:
+            get_memory_manager()
+            app.state.memory_errors = get_memory_errors()
+        except Exception as e:  # noqa: BLE001 —— 记忆是可选能力，永不阻断启动
+            app.state.memory_errors = [f"memory 装配异常：{type(e).__name__}: {e}"]
+
         try:
             yield
         finally:
@@ -56,6 +70,7 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     from .routes.chat import router as chat_router
+    from .routes.memories import router as memories_router
     from .routes.skills import router as skills_router
     from .routes.tools import router as tools_router
     from .ws.agent import router as ws_router
@@ -63,6 +78,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_router)
     app.include_router(tools_router)
     app.include_router(skills_router)
+    app.include_router(memories_router)
     app.include_router(ws_router)
 
     return app

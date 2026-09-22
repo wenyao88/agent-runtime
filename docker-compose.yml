@@ -1,6 +1,8 @@
 services:
   api:
     build: .
+    # 起服务前先建表/迁移："起服务即可用"，不需要人工记得跑 alembic
+    command: sh -c "alembic upgrade head && uvicorn agent_runtime.api.app:app --host 0.0.0.0 --port 8000"
     ports:
       - "8000:8000"
     environment:
@@ -9,6 +11,12 @@ services:
       - LLM_MODEL=${LLM_MODEL:-deepseek-ai/DeepSeek-V3}
       - DATABASE_URL=postgresql+asyncpg://agent:agent@postgres:5432/agent_runtime
       - REDIS_URL=redis://redis:6379/0
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-https://api.siliconflow.cn/v1}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-large-zh-v1.5}
+      - MEMORY_SHORT_TERM_ENABLED=${MEMORY_SHORT_TERM_ENABLED:-false}
+      - MEMORY_LONG_TERM_ENABLED=${MEMORY_LONG_TERM_ENABLED:-false}
+      - MEMORY_CONSOLIDATE_ENABLED=${MEMORY_CONSOLIDATE_ENABLED:-false}
     depends_on:
       - postgres
       - redis

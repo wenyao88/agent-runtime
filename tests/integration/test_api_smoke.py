@@ -127,6 +127,20 @@ def test_chat_and_ws_smoke() -> None:
             assert github["triggers"], github
             assert app.state.skill_errors == [], app.state.skill_errors
 
+            # ── REST: GET /api/memories（默认全关：未启用层返回 enabled=false，而不是报错）──
+            mem_resp = client.get("/api/memories")
+            assert mem_resp.status_code == 200, mem_resp.text
+            mem_body = mem_resp.json()
+            assert mem_body["settings"]["short_term"]["enabled"] is False, mem_body
+            assert mem_body["settings"]["long_term"]["enabled"] is False, mem_body
+            assert mem_body["count"] == 0 and mem_body["memories"] == [], mem_body
+            assert app.state.memory_errors == [], app.state.memory_errors
+
+            # ── REST: DELETE /api/memories ──
+            del_resp = client.delete("/api/memories")
+            assert del_resp.status_code == 200, del_resp.text
+            assert del_resp.json()["cleared"]["short_term"]["enabled"] is False
+
             # ── WebSocket: /ws/agent/{session_id} ──
             with client.websocket_connect("/ws/agent/test-session") as ws:
                 ws.send_json({"type": "task", "task": TASK})
