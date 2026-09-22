@@ -49,5 +49,15 @@ class Settings(BaseSettings):
     agent_skill_top_k: int = 1  # 每次最多注入几个命中的技能
     agent_task_planning_enabled: bool = False  # TaskPlanner 默认关闭（额外一次 LLM 调用）
 
+    # Memory（Phase 4 三层记忆；**默认全关** —— 没起 DB/Redis 也不得影响启动与任务）
+    memory_short_term_enabled: bool = False  # Redis 会话级记忆
+    memory_long_term_enabled: bool = False  # PG + pgvector 跨会话语义记忆
+    memory_consolidate_enabled: bool = False  # 任务结束是否整理写入持久层
+    memory_recall_top_k: int = 3  # 注入 System Prompt 的召回条数上限
+    memory_short_term_ttl_seconds: int = 86400
+    memory_short_term_max_items: int = 200
+    memory_inject_max_chars: int = 500  # 单条记忆注入长度（超出带标记截断）
+    memory_embedding_dim: int = 1024  # 必须与迁移里的 vector(1024) 一致
+
     # MCP（可选能力：文件缺失即视为不启用，不影响启动）
     mcp_servers_file: str = "mcp_servers.json"
