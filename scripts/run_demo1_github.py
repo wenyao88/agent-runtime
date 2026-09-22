@@ -36,6 +36,30 @@ def build_task(repo: str, focus: str = "") -> str:
     return task
 
 
+def format_warning(warning: str | None) -> str:
+    """把告警渲染成醒目的一行。
+
+    CLI 必须让用户看见"本轮不可信"——只设置不显示等于没有。本机实测中就踩过这个漏。
+    """
+    if not warning:
+        return ""
+    return f"⚠ 注意：{warning}"
+
+
+def format_summary(result: object) -> str:
+    """收尾摘要：步数 / token / 耗时 / trace，以及**告警**（有就必须出现）。"""
+    steps = len(getattr(result, "steps", None) or [])
+    usage = getattr(result, "total_tokens", None)
+    tokens = getattr(usage, "total_tokens", 0) if usage is not None else 0
+    latency = getattr(result, "total_latency_ms", 0)
+    trace_id = getattr(result, "trace_id", "")
+    lines = [f"步数 {steps} · token {tokens} · 耗时 {latency}ms · trace {trace_id}"]
+    rendered = format_warning(getattr(result, "warning", None))
+    if rendered:
+        lines.append(rendered)
+    return "\n".join(lines)
+
+
 def _require_deps() -> str | None:
     """返回缺失依赖的说明；依赖齐备时返回 None。"""
     missing = []
@@ -127,10 +151,7 @@ async def run(repo: str, focus: str) -> int:
         print("未产出结果")
         return 1
     print("\n" + "─" * 72)
-    print(
-        f"步数 {len(result.steps)} · token {result.total_tokens.total_tokens} · "
-        f"耗时 {result.total_latency_ms}ms · trace {result.trace_id}"
-    )
+    print(format_summary(result))
     return 0
 
 

@@ -62,6 +62,47 @@ def test_main_rejects_blank_repo_before_touching_deps() -> None:
     assert module.main(["--repo", "   "]) == 2
 
 
+def test_format_warning_is_empty_when_no_warning() -> None:
+    module = _load()
+    assert module.format_warning(None) == ""
+    assert module.format_warning("") == ""
+
+
+def test_summary_surfaces_the_warning() -> None:
+    """CLI 必须把"本轮不可信"显示出来 —— 本机实测中告警被设置了却没被打印。"""
+    import types
+
+    module = _load()
+
+    class FakeResult:
+        steps = [1, 2]
+        total_tokens = types.SimpleNamespace(total_tokens=123)
+        total_latency_ms = 45
+        trace_id = "abc123"
+        warning = "所有工具调用都失败了（1/1）：最终答案没有建立在真实工具结果之上，请勿直接采信"
+
+    text = module.format_summary(FakeResult())
+    assert "trace abc123" in text
+    assert "所有工具调用都失败了" in text, "告警必须出现在收尾摘要里"
+    assert "⚠" in text
+
+
+def test_summary_has_no_warning_marker_on_success() -> None:
+    import types
+
+    module = _load()
+
+    class FakeResult:
+        steps = [1]
+        total_tokens = types.SimpleNamespace(total_tokens=10)
+        total_latency_ms = 5
+        trace_id = "ok"
+        warning = None
+
+    text = module.format_summary(FakeResult())
+    assert "⚠" not in text
+
+
 def _run_all() -> None:
     tests = [
         v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)
