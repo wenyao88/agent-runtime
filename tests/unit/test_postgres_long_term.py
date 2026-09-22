@@ -197,7 +197,7 @@ def test_store_embeds_content_when_entry_has_no_vector() -> None:
     assert "INSERT INTO memory_entries" in sql
     assert "RETURNING" in sql.upper()
     assert params["content"] == "要记住的内容"
-    assert len(params["vec"]) == DIM
+    assert isinstance(params["vec"], str) and params["vec"].count(",") == DIM - 1
     assert new_id == "abc-123"
 
 
