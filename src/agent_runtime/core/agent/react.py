@@ -1,5 +1,12 @@
 """ReAct Loop：单一代码路径。_execute() 是 async generator，逐步 yield AgentEvent；
-run() 只消费事件流；run_stream() 原样转发。错误一律转 observation。"""
+run() 只消费事件流；run_stream() 原样转发。错误一律转 observation。
+
+关于"模型编造"：光靠"证据进了上下文"是不够的 —— Demo 1 实测中，工具全部失败后
+模型仍然凭自身知识写出了完整报告。因此这里做两件事：
+  1. System Prompt 里写明硬规则：只能基于工具结果陈述，失败必须如实报告，禁止编造；
+  2. 循环结束时若**所有工具调用都失败**，在 AgentResult.warning 与 FINAL_ANSWER 事件里
+     明确告警 —— 把"不可采信"这件事变成用户可见的事实，而不是信任模型自觉。
+"""
 from __future__ import annotations
 
 import asyncio
@@ -22,7 +29,16 @@ from .events import AgentEvent, AgentEventType
 DEFAULT_SYSTEM_PROMPT = (
     "You are a capable technical R&D agent. Think step by step, "
     "call tools when needed, then give the final answer. "
-    "Reply in the user's language, concisely."
+    "Reply in the user's language, concisely.\n"
+    "HARD RULES about evidence:\n"
+    "1. Every factual claim about the subject must come from tool results in this conversation. "
+    "Do not use your own memory to fill in repository contents, file bodies, API signatures or citations.\n"
+    "2. If a tool fails or returns an error, say so plainly and state what could not be obtained. "
+    "Never fabricate tool output to cover a failure.\n"
+    "3. If failures prevent completing the task, answer with what failed, its readable cause, "
+    "and what the user should try next. A short honest report beats a complete-looking invented one.\n"
+    "工具失败时必须如实说明失败原因与拿不到的信息；严禁依据自身知识编造工具结果、文件内容、"
+    "仓库结构或引用来源。任务无法完成时，直接说明失败点与建议，不要为了凑完整而编造。"
 )
 
 
@@ -89,7 +105,6 @@ class ReActLoop:
         t_start = time.monotonic()
         total = TokenUsage()
         steps: list[AgentStep] = []
-        warning: str | None = None
         trace_id = ""
 
         if self.tracer:
@@ -114,6 +129,8 @@ class ReActLoop:
         answered = False
         answer = ""
         final_step = 0
+        tool_calls_total = 0
+        tool_calls_failed = 0
 
         for n in range(1, self.max_steps + 1):
             final_step = n
@@ -130,12 +147,9 @@ class ReActLoop:
             yield AgentEvent(AgentEventType.THOUGHT, {"step": n, "content": thought})
 
             if not resp.tool_calls:
+                # 最终答案统一在循环之后发出：那时才知道"工具是否全部失败"，
+                # 才能把告警一并带给用户，而不是让它以为这是可信结论。
                 answer = resp.content or ""
-                steps.append(AgentStep(step_number=n, thought=thought,
-                                       action=FinalAnswer(content=answer)))
-                if self.tracer:
-                    self.tracer.record_final_answer(answer)
-                yield AgentEvent(AgentEventType.FINAL_ANSWER, {"content": answer})
                 answered = True
                 break
 
@@ -143,6 +157,7 @@ class ReActLoop:
             self.ctx.append(Message(role="assistant", content=resp.content,
                                     tool_calls=resp.tool_calls))
             for tc in resp.tool_calls:
+                tool_calls_total += 1
                 args = self._parse_args(tc.arguments)
                 if self.tracer:
                     self.tracer.record_tool_call(n, tc.name, tc.arguments)
@@ -153,6 +168,8 @@ class ReActLoop:
                                         text=f"Error: arguments of '{tc.name}' is not valid JSON object: {tc.arguments!r}")
                 else:
                     result = await self._exec_tool(tc, args)
+                if not result.success:
+                    tool_calls_failed += 1
                 obs_text = result.text  # 错误同样可读——成功/失败都直接用 result.text
                 self.ctx.append(Message(role="tool", content=obs_text, tool_call_id=tc.id))
                 if self.tracer:
@@ -172,8 +189,15 @@ class ReActLoop:
                         "before": cr.tokens_before, "after": cr.tokens_after,
                         "strategy": cr.strategy.value})
 
+        warnings: list[str] = []
+        if tool_calls_total and tool_calls_failed == tool_calls_total:
+            warnings.append(
+                f"所有工具调用都失败了（{tool_calls_failed}/{tool_calls_total}）："
+                "最终答案没有建立在真实工具结果之上，请勿直接采信"
+            )
+
         if not answered:
-            warning = f"max_steps({self.max_steps}) reached; forced final answer"
+            warnings.append(f"max_steps({self.max_steps}) reached; forced final answer")
             resp = await self.llm.chat(self.ctx.get_messages(), tools=None)
             answer = resp.content or ""
             total.prompt_tokens += resp.token_usage.prompt_tokens
@@ -181,9 +205,14 @@ class ReActLoop:
             total.total_tokens += resp.token_usage.total_tokens
             steps.append(AgentStep(step_number=final_step, thought="(forced)",
                                    action=FinalAnswer(content=answer)))
-            if self.tracer:
-                self.tracer.record_final_answer(answer)
-            yield AgentEvent(AgentEventType.FINAL_ANSWER, {"content": answer, "warning": warning})
+        else:
+            steps.append(AgentStep(step_number=final_step, thought=thought,
+                                   action=FinalAnswer(content=answer)))
+
+        warning = "；".join(warnings) if warnings else None
+        if self.tracer:
+            self.tracer.record_final_answer(answer)
+        yield AgentEvent(AgentEventType.FINAL_ANSWER, {"content": answer, "warning": warning})
 
         total_latency = int((time.monotonic() - t_start) * 1000)
         self.last_result = AgentResult(

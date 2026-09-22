@@ -15,10 +15,12 @@ class MockLLMProvider(BaseLLMProvider):
         self._script = list(script)
         self.calls = 0
         self.last_tools: list[dict] | None = None
+        self.last_messages: list[Message] | None = None
 
     async def chat(self, messages: list[Message], tools: list[dict] | None = None) -> LLMResponse:
         self.calls += 1
         self.last_tools = tools
+        self.last_messages = list(messages)
         if len(self._script) == 1:
             r = self._script[0]
         else:

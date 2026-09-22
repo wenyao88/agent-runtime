@@ -30,12 +30,26 @@ def _to_openai_messages(messages: list[Message]) -> list[dict]:
 
 
 class OpenAICompatibleProvider(BaseLLMProvider):
-    def __init__(self, api_key: str, base_url: str, model: str, timeout: float = 60.0):
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        timeout: float = 60.0,
+        temperature: float = 0.2,
+    ):
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
         self._model = model
+        # 工具型 Agent 需要可复现、贴证据。不少厂商默认 temperature 偏高（0.6~1.0），
+        # Demo 1 实测中小模型在工具全失败时更倾向于编造，因此显式压低并允许配置。
+        self._temperature = temperature
 
     async def chat(self, messages: list[Message], tools: list[dict] | None = None) -> LLMResponse:
-        kw: dict = {"model": self._model, "messages": _to_openai_messages(messages)}
+        kw: dict = {
+            "model": self._model,
+            "messages": _to_openai_messages(messages),
+            "temperature": self._temperature,
+        }
         if tools:
             kw["tools"] = tools
         r = await self._client.chat.completions.create(**kw)
@@ -59,7 +73,12 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         )
 
     async def stream(self, messages: list[Message], tools: list[dict] | None = None) -> AsyncIterator[LLMStreamChunk]:
-        kw: dict = {"model": self._model, "messages": _to_openai_messages(messages), "stream": True}
+        kw: dict = {
+            "model": self._model,
+            "messages": _to_openai_messages(messages),
+            "stream": True,
+            "temperature": self._temperature,
+        }
         if tools:
             kw["tools"] = tools
         s = await self._client.chat.completions.create(**kw)

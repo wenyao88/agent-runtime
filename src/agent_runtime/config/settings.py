@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.siliconflow.cn/v1"
     llm_model: str = "deepseek-ai/DeepSeek-V3"
     llm_max_tokens: int = 128000
+    llm_temperature: float = 0.2  # 工具型 Agent 宜低：偏高的默认值会加重编造
 
     # Judge LLM (optional)
     judge_llm_provider: str = "openai_compatible"

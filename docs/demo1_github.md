@@ -78,3 +78,22 @@ python scripts/run_demo_mock.py
 ```
 
 用脚本化假模型驱动同一条 ReAct 链路（思考 → 调工具 → 观察 → 纠错 → 最终答案），不需要任何 key，适合快速确认代码跑得通。
+
+## 7. 本机实测问题与修复（2026-09-21）
+
+首次在本机跑 Demo 1 时暴露两个问题，均已在代码中修复并被测试钉住：
+
+| 问题 | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| GitHub 工具全部 301 | 四个 `github_*` 都返回 `HTTP 301` | httpx 默认**不跟随重定向**；GitHub 对 http→https、或改名/迁移过的仓库回 301 | `AsyncClient(follow_redirects=True)`；`test_default_client_follows_redirects` 用桩 httpx 模块锁住该构造契约 |
+| 模型编造报告 | 工具全部失败后仍输出完整分析 | System Prompt 里没有任何约束；且结果中**不存在**"本轮不可信"的信号 | Prompt 硬规则 + **全工具失败告警**（`warning` + `final_answer` 事件）+ 低 temperature |
+
+关于第二个问题，有一个值得记住的细节：修复前新写的测试 `test_tool_failure_evidence_reaches_the_model` **一次就通过**了——
+说明失败原因本来就进了上下文。模型不是"不知道失败"，而是"知道了仍然编造"。因此只补证据链没用，必须同时
+（a）在指令里明确禁止，并（b）把"全工具失败"提升为用户可见的告警。
+
+> 因为这条规则，`test_bad_json_args_recovery` 里旧的 `assert result.warning is None` 已**有意更新**为断言告警存在：
+> 该场景唯一的工具调用失败了，答案确实没有任何成功工具结果支撑。
+
+**小模型注意事项**：Qwen3-8B 这类小模型即使有明确指令也更易跑偏。演示时建议用 DeepSeek-V3 / Qwen2.5-72B 级别的模型；
+若坚持用 8B，请看 `warning` 字段，并注意报告里的每条结论是否都能对应到 Step 中的工具返回。

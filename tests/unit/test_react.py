@@ -108,7 +108,10 @@ async def test_bad_json_args_recovery():
     try:
         result = await agent.run("演示坏参数恢复")
         assert result.final_answer == "恢复"
-        assert result.warning is None
+        # 行为变更（Demo 1 修复）：本次唯一的工具调用失败了，所以答案**没有**任何成功工具
+        # 结果支撑 —— 必须带告警。旧断言 `warning is None` 固化的是修复前的行为，已过时。
+        assert result.warning is not None, "全工具失败必须告警"
+        assert "1/1" in result.warning
         assert "not valid JSON" in (result.steps[0].observation or "")
         tool_msgs = [m for m in ctx.get_messages() if m.role == "tool"]
         assert len(tool_msgs) == 1
@@ -188,6 +191,49 @@ async def test_token_aggregation():
         assert result.total_tokens.prompt_tokens == 60
         assert result.total_tokens.completion_tokens == 35
         assert result.total_tokens.total_tokens == 95
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_system_prompt_forbids_fabricating_tool_results():
+    # ⑥ 工具失败时只能如实报告，禁止用自己的知识编造工具结果（小模型尤其容易犯）
+    from agent_runtime.core.agent.react import DEFAULT_SYSTEM_PROMPT as prompt
+
+    low = prompt.lower()
+    assert "fabricat" in low or "编造" in prompt, "必须明确禁止编造工具结果"
+    assert "fail" in low or "失败" in prompt, "必须说明工具失败时怎么办"
+    assert "tool" in low or "工具" in prompt
+
+
+async def test_all_tools_failed_sets_warning():
+    # ⑦ 所有工具都失败时，结果必须带 warning —— 否则用户会把编造内容当真
+    script = [
+        _tc("c1", '{"path": "missing.txt"}'),
+        LLMResponse(content="## 报告\n1. 项目用途：某框架\n（这一段是编造的）"),
+    ]
+    agent, ctx, memory, tracer, root = _setup(script)
+    try:
+        result = await agent.run("读取 missing.txt 并总结")
+        assert result.warning, "全工具失败必须产生 warning"
+        assert "失败" in result.warning or "fail" in result.warning.lower()
+        assert "1/1" in result.warning or "1" in result.warning
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_tool_failure_evidence_reaches_the_model():
+    # ⑧ 失败原因必须真的进入上下文，模型才有据可依地如实报告
+    script = [
+        _tc("c1", '{"path": "missing.txt"}'),
+        LLMResponse(content="如实报告：目标文件不存在，无法分析"),
+    ]
+    agent, ctx, memory, tracer, root = _setup(script)
+    try:
+        await agent.run("读取 missing.txt")
+        messages = getattr(agent.llm, "last_messages", None)
+        assert messages, "Mock LLM 应记录最后一次收到的上下文"
+        joined = "\n".join(m.content or "" for m in messages)
+        assert "not found" in joined, joined[-400:]
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

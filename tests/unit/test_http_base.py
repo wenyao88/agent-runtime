@@ -148,6 +148,34 @@ def test_missing_httpx_is_reported_clearly() -> None:
     assert "httpx" in (outcome.error or "")
 
 
+def test_default_client_follows_redirects() -> None:
+    """httpx 默认**不**跟随重定向；GitHub 对 http→https 或改名仓库回 301，
+    四个 GitHub 工具会因此全部失败。用桩 httpx 模块锁住这个构造契约。"""
+    import sys
+    import types
+
+    recorded: dict = {}
+
+    class StubAsyncClient:
+        def __init__(self, **kw):
+            recorded.update(kw)
+
+    stub = types.ModuleType("httpx")
+    stub.AsyncClient = StubAsyncClient  # type: ignore[attr-defined]
+    original = sys.modules.get("httpx")
+    sys.modules["httpx"] = stub
+    try:
+        tool = DummyTool()  # 不注入 client → 走默认构造
+        client = tool._get_client()
+        assert isinstance(client, StubAsyncClient)
+        assert recorded.get("follow_redirects") is True, recorded
+    finally:
+        if original is None:
+            sys.modules.pop("httpx", None)
+        else:
+            sys.modules["httpx"] = original
+
+
 def _run_all() -> None:
     tests = [
         v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)

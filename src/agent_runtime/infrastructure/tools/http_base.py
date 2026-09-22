@@ -53,7 +53,11 @@ class HttpToolBase(BaseTool):
         import httpx  # 惰性导入：未安装时在 _request 里变成可读错误
 
         self._client = httpx.AsyncClient(
-            timeout=self._timeout, headers={"User-Agent": self._user_agent}
+            timeout=self._timeout,
+            headers={"User-Agent": self._user_agent},
+            # httpx 默认**不**跟随重定向；GitHub 对 http→https 或改名仓库回 301，
+            # 不跟随会让四个 GitHub 工具全部失败（Demo 1 实测踩到）。
+            follow_redirects=True,
         )
         return self._client
 

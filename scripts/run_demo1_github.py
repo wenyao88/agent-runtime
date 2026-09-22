@@ -23,7 +23,9 @@ DEMO_TASK = """分析 GitHub 仓库 {repo}，给出一份结构化报告：
 3. 挑 1-2 个关键文件用 github_read_file 阅读（优先 README 或入口文件）；
 4. 最后输出四部分：项目用途、技术栈、目录结构要点、2-3 条具体可执行的改进建议。
 
-要求：每一步都基于工具返回的真实内容，不要凭印象编造；引用文件内容时注明来源路径。"""
+要求：每一步都基于工具返回的真实内容，不要凭印象编造；引用文件内容时注明来源路径。
+如果某个工具失败（例如 404、403、超时、路径不存在），必须如实说明失败原因与因此拿不到的信息，
+禁止用你自己的知识补全仓库结构、文件内容或引用。任务无法完成时，直接给出失败点与建议。"""
 
 
 def build_task(repo: str, focus: str = "") -> str:
@@ -84,6 +86,7 @@ def build_agent():
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
         model=settings.llm_model,
+        temperature=settings.llm_temperature,
     )
     return ReActLoop(
         llm=llm,

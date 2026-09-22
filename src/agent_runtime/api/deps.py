@@ -68,7 +68,10 @@ def get_llm():
 
     s = get_settings()
     return OpenAICompatibleProvider(
-        api_key=s.llm_api_key, base_url=s.llm_base_url, model=s.llm_model
+        api_key=s.llm_api_key,
+        base_url=s.llm_base_url,
+        model=s.llm_model,
+        temperature=s.llm_temperature,
     )
 
 
