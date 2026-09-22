@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
 
 
 @dataclass
@@ -9,6 +10,10 @@ class MemoryEntry:
     metadata: dict = field(default_factory=dict)
     embedding: list[float] | None = None
     id: str | None = None
+    # `source` / `created_at` 是**查询期**语义：同一条记忆在不同层来源不同，
+    # 由各层在返回时填充，再经 annotate 归一（Phase 4）。
+    source: str = ""
+    created_at: datetime | None = None
 
 
 @dataclass
@@ -17,6 +22,7 @@ class MemoryQuery:
     embedding: list[float] | None = None
     top_k: int = 5
     metadata_filters: dict | None = None
+    session_id: str | None = None
 
 
 class BaseMemory(ABC):
