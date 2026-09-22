@@ -68,10 +68,12 @@ class MemoryManager:
             return []
         try:
             entries = await layer.query(query)
+            # with_source 也必须在 try 内：`layer.query` 是**注入边界**，
+            # 返回的不是 MemoryEntry（例如 dict）时 replace() 会抛，逃出契约。
+            return with_source(list(entries or []), source)
         except Exception as e:  # noqa: BLE001 —— by design：记忆层失败不得影响任务
             self._record(f"{source} 查询失败：{type(e).__name__}: {e}")
             return []
-        return with_source(list(entries or []), source)
 
     async def _safe_store(self, layer, source: str, entry: MemoryEntry) -> None:
         if layer is None:
@@ -112,7 +114,7 @@ class MemoryManager:
         持久层只留摘要后的内容；**工作层留原文**（同会话内召回要的是原始细节）。
         持久内容一律截断并带标记：持久层不该存无界文本。
         """
-        text = await self._summarize(entry.content or "")
+        text = await self._summarize(str(entry.content or ""))
         if len(text) > MAX_CONSOLIDATE_CHARS:
             text = text[:MAX_CONSOLIDATE_CHARS] + TRUNCATED_MARK
         persisted = replace(entry, content=text)  # 不改原对象：工作层那份要保留原文
@@ -125,11 +127,15 @@ class MemoryManager:
             merged.extend(await self._safe_query(self.short_term, query, SOURCE_SHORT))
         if len(merged) < query.top_k:
             merged.extend(await self._safe_query(self.long_term, query, SOURCE_LONG))
-        return sort_entries(dedupe(merged))[: query.top_k]
+        try:
+            return sort_entries(dedupe(merged))[: query.top_k]
+        except Exception as e:  # noqa: BLE001 —— 注入层给的 created_at 可能不是 datetime
+            self._record(f"召回整理失败（退化为未整理结果）：{type(e).__name__}: {e}")
+            return merged[: query.top_k]
 
     async def consolidate(self, task_summary: str, session_id: str = "") -> None:
         """显式整理一段文本并写入持久层（供调用方 / Benchmark 使用）。"""
-        text = (task_summary or "").strip()
+        text = str(task_summary or "").strip()
         if not text:
             return
         entry = MemoryEntry(

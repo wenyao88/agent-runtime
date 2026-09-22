@@ -279,6 +279,44 @@ def test_store_without_summarizer_persists_raw_text() -> None:
     assert long_.stored[0].content == "原文"
 
 
+def test_never_raises_on_junk_from_layers_or_callers() -> None:
+    """契约是「`store`/`recall`/`consolidate` 绝不外抛」，而 `react.py` 的调用点**没有 try**。
+
+    Phase 4 独立审查实测出四条逃逸路径（全在逐层 try 之外）：层返回的不是 `MemoryEntry`、
+    `created_at` 不是 datetime、`content` 不是 str、`task_summary` 不是 str。
+    用现有两个层构造不出触发（它们都做了归一），但 `core/` 是**给别人注入用的边界** ——
+    只要存在"只有注入方才能触发的破口"，这个契约就不成立。
+    """
+
+    class JunkLayer(BaseMemory):
+        async def store(self, entry: MemoryEntry) -> str:
+            return "id"
+
+        async def query(self, query: MemoryQuery) -> list:
+            return [{"content": "dict 而不是 MemoryEntry"}]
+
+        async def clear(self) -> None:
+            return None
+
+    class BadTimeLayer(BaseMemory):
+        async def store(self, entry: MemoryEntry) -> str:
+            return "id"
+
+        async def query(self, query: MemoryQuery) -> list[MemoryEntry]:
+            return [MemoryEntry(content="x", created_at="2026-01-01")]  # type: ignore[arg-type]
+
+        async def clear(self) -> None:
+            return None
+
+    _run(MemoryManager(working=WorkingMemory(), short_term=JunkLayer()).recall(
+        MemoryQuery(text="x", top_k=1)))
+    _run(MemoryManager(working=WorkingMemory(), long_term=BadTimeLayer()).recall(
+        MemoryQuery(text="x", top_k=1)))
+    mgr = MemoryManager(working=WorkingMemory(), long_term=FakeLayer())
+    _run(mgr.store(MemoryEntry(content=123)))  # type: ignore[arg-type]
+    _run(mgr.consolidate(456))  # type: ignore[arg-type]
+
+
 def _run_all() -> None:
     failed = []
     for name, fn in sorted(globals().items()):
