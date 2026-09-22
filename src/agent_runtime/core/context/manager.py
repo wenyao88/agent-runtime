@@ -1,22 +1,45 @@
+"""上下文管理：组装、追加、token 计量、按策略压缩。
+
+压缩的三条不变量（都有测试钉死）：
+  1. system prompt 与**当前任务**永不丢弃（spec 优先级 1：任务丢了 Agent 就失去目标）；
+  2. 保留段不得以 `role="tool"` 开头 —— 孤立的 tool 结果违反 OpenAI 消息协议约束；
+  3. 显式传入的 strategy 优先于自动选择；SUMMARIZE 在 Phase 5 之前降级为 TRUNCATE，
+     并如实记录 `degraded_from`（不假装做过摘要）。
+"""
+from __future__ import annotations
+
 try:
     import tiktoken
+
     _ENC = tiktoken.get_encoding("cl100k_base")
 
     def _count(text: str) -> int:
         return len(_ENC.encode(text))
-except ImportError:  # sandbox: no tiktoken — char/4 estimate
+
+except ImportError:  # 无 tiktoken 时退化为字符数估算，保证核心链路可用
+
     def _count(text: str) -> int:
         return max(1, len(text) // 4)
 
+
 from ..llm.types import Message
 from .budget import TokenBudget
-from .compaction import CompactionResult
-from .compaction import CompactionStrategy
+from .compaction import (
+    CompactionResult,
+    CompactionStrategy,
+    decide_strategy,
+    squeeze_text,
+)
 
 
 class ContextManager:
-    def __init__(self, budget: TokenBudget | None = None):
+    def __init__(
+        self,
+        budget: TokenBudget | None = None,
+        keep_recent: int = 6,
+    ):
         self._budget = budget or TokenBudget()
+        self._keep_recent = max(0, keep_recent)
         self._messages: list[Message] = []
 
     async def build(
@@ -51,6 +74,10 @@ class ContextManager:
         text = "".join(m.content or "" for m in self._messages)
         return _count(text)
 
+    def token_ratio(self) -> float:
+        """当前占用 / 可用预算，用于 decide_strategy。"""
+        return self.token_count() / max(1, self._budget.available)
+
     def get_messages(self) -> list[Message]:
         return list(self._messages)
 
@@ -59,15 +86,76 @@ class ContextManager:
 
     async def compact(self, strategy: CompactionStrategy | None = None) -> CompactionResult:
         before = self.token_count()
-        actual_strategy = strategy or CompactionStrategy.TRUNCATE
-        # Phase 0: drop oldest messages (keep system + last 4)
-        if len(self._messages) > 5:
-            system = self._messages[0]
-            self._messages = [system] + self._messages[-4:]
+
+        chosen = strategy or decide_strategy(self.token_ratio())
+        degraded_from: CompactionStrategy | None = None
+        if chosen is CompactionStrategy.SUMMARIZE:
+            # Phase 5 之前没有 summarizer LLM —— 降级，但如实记录降级来源
+            degraded_from = CompactionStrategy.SUMMARIZE
+            chosen = CompactionStrategy.TRUNCATE
+
+        squeezed = 0
+        dropped = 0
+        if chosen is CompactionStrategy.SQUEEZE:
+            squeezed = self._squeeze()
+            if strategy is None and self.should_compact():
+                # 自动模式升级：SQUEEZE 压不下去（例如占用主要来自非工具消息）时继续走 TRUNCATE。
+                # 否则 ReActLoop 每步都会再调一次 compact()，而 SQUEEZE 已是空操作 ——
+                # 空转的同时 token 继续增长，最终上下文溢出。
+                dropped = self._truncate()
+                chosen = CompactionStrategy.TRUNCATE
+        else:
+            dropped = self._truncate()
+
         after = self.token_count()
         return CompactionResult(
-            strategy=actual_strategy,
+            strategy=chosen,
             tokens_before=before,
             tokens_after=after,
-            messages_dropped=before - after,
+            messages_dropped=dropped,
+            messages_squeezed=squeezed,
+            degraded_from=degraded_from,
         )
+
+    # ── 内部策略实现 ──
+
+    def _squeeze(self) -> int:
+        """就地压缩 tool 消息的长文本；返回被压缩的条数。"""
+        squeezed = 0
+        for message in self._messages:
+            if message.role != "tool":
+                continue
+            original = message.content or ""
+            compressed = squeeze_text(original)
+            if compressed != original:
+                message.content = compressed
+                squeezed += 1
+        return squeezed
+
+    def _truncate(self) -> int:
+        """丢弃最旧消息（保留 system + 当前任务 + 最近若干条）；返回真实丢弃条数。"""
+        messages = self._messages
+        if len(messages) <= 2:
+            return 0
+
+        system = messages[0]
+        task: Message | None = None
+        rest_start = 1
+        if messages[1].role == "user":
+            task = messages[1]
+            rest_start = 2
+        rest = messages[rest_start:]
+
+        keep = list(rest[-self._keep_recent :]) if self._keep_recent else []
+        # 不变量：保留段不能以 tool 结果开头（否则就是没有对应 assistant tool_calls 的孤儿消息）
+        while keep and keep[0].role == "tool" and len(keep) < len(rest):
+            keep.pop(0)
+
+        new_messages = [system]
+        if task is not None:
+            new_messages.append(task)
+        new_messages.extend(keep)
+
+        dropped = len(messages) - len(new_messages)
+        self._messages = new_messages
+        return dropped
