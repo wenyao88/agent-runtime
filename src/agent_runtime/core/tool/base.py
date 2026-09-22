@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
@@ -8,6 +10,27 @@ class PropertyDef:
     type: str = "string"
     description: str = ""
     enum: list[str] | None = None
+    items: PropertyDef | None = None  # type="array" 时的元素定义
+    default: Any = None
+    minimum: int | None = None
+    maximum: int | None = None
+
+    def to_json_schema(self) -> dict:
+        """只输出已设置的键（None 与空 description 不落盘），保持生成结果干净。"""
+        out: dict = {"type": self.type}
+        if self.description:
+            out["description"] = self.description
+        if self.enum:
+            out["enum"] = list(self.enum)
+        if self.items is not None:
+            out["items"] = self.items.to_json_schema()
+        if self.default is not None:
+            out["default"] = self.default
+        if self.minimum is not None:
+            out["minimum"] = self.minimum
+        if self.maximum is not None:
+            out["maximum"] = self.maximum
+        return out
 
 
 @dataclass
@@ -54,8 +77,7 @@ class BaseTool(ABC):
                 "parameters": {
                     "type": self.parameters.type,
                     "properties": {
-                        k: {"type": v.type, "description": v.description}
-                        for k, v in self.parameters.properties.items()
+                        k: v.to_json_schema() for k, v in self.parameters.properties.items()
                     },
                     "required": self.parameters.required,
                 },
