@@ -25,6 +25,7 @@ from ..tool.base import ToolResult
 from ..tool.registry import ToolRegistry
 from .base import AgentResult, AgentStep, FinalAnswer, ToolCall
 from .events import AgentEvent, AgentEventType
+from .planner import TaskPlanner
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a capable technical R&D agent. Think step by step, "
@@ -50,6 +51,8 @@ class ReActLoop:
         context_manager: ContextManager,
         memory_manager: MemoryManager | None = None,
         skill_router: SkillRouter | None = None,
+        planner: TaskPlanner | None = None,
+        skill_top_k: int = 1,
         tracer: Tracer | None = None,
         max_steps: int = 15,
         tool_timeout: float = 30.0,
@@ -59,6 +62,8 @@ class ReActLoop:
         self.ctx = context_manager
         self.memory = memory_manager
         self.skills = skill_router
+        self.planner = planner
+        self.skill_top_k = skill_top_k
         self.tracer = tracer
         self.max_steps = max_steps
         self.tool_timeout = tool_timeout
@@ -107,24 +112,36 @@ class ReActLoop:
         steps: list[AgentStep] = []
         trace_id = ""
 
+        # 1) Skill 命中（纯计算，先做：trace session 一开始就能带上 skills）
+        matched = self.skills.match(task, self.skill_top_k) if self.skills else []
+        skills_used = [s.manifest.name for s in matched]
+
         if self.tracer:
-            session = await self.tracer.start_session(task, {"max_steps": self.max_steps})
+            session = await self.tracer.start_session(
+                task, {"max_steps": self.max_steps, "skills": skills_used}
+            )
             trace_id = session.trace_id
 
-        # 1) 可选 Skill 注入
+        # 2) 技能文本 + 计划文本：**只能追加**在硬规则之后（顺序有测试钉死）
         sys_extra = ""
-        matched = self.skills.match(task) if self.skills else []
         if matched:
-            sys_extra = "\n\n".join(s.build_prompt_extension(task) for s in matched)
-        # 2) 可选 Memory 召回
+            sys_extra = "\n\n" + "\n\n".join(s.build_prompt_extension(task) for s in matched)
+        if self.planner:
+            plan_text = await self.planner.plan(task, self.tools.get_names())
+            if plan_text:
+                sys_extra += "\n\n## 执行计划（仅供参考，可按实际情况调整）\n" + plan_text
+        # 3) 可选 Memory 召回
         memories = []
         if self.memory:
             memories = await self.memory.recall(MemoryQuery(text=task, top_k=3))
 
         await self.ctx.build(
             task=task, tools=self.tools.list_schemas(), memory_entries=memories,
-            skills=matched, system_prompt=DEFAULT_SYSTEM_PROMPT + sys_extra,
+            system_prompt=DEFAULT_SYSTEM_PROMPT + sys_extra,
         )
+
+        if matched:
+            yield AgentEvent(AgentEventType.SKILL_MATCHED, {"skills": skills_used})
 
         answered = False
         answer = ""
@@ -218,6 +235,7 @@ class ReActLoop:
         self.last_result = AgentResult(
             task=task, final_answer=answer, steps=steps, total_tokens=total,
             total_latency_ms=total_latency, trace_id=trace_id, warning=warning,
+            skills_used=skills_used,
         )
         if self.memory:
             await self.memory.store(MemoryEntry(

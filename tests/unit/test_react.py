@@ -9,12 +9,16 @@ import shutil
 
 from agent_runtime.core.agent.base import FinalAnswer, ToolCall
 from agent_runtime.core.agent.events import AgentEventType
-from agent_runtime.core.agent.react import ReActLoop
+from agent_runtime.core.agent.planner import TaskPlanner
+from agent_runtime.core.agent.react import DEFAULT_SYSTEM_PROMPT, ReActLoop
 from agent_runtime.core.context.budget import TokenBudget
 from agent_runtime.core.context.manager import ContextManager
 from agent_runtime.core.llm.types import FunctionCall, LLMResponse, TokenUsage
 from agent_runtime.core.memory.manager import MemoryManager
 from agent_runtime.core.memory.working import WorkingMemory
+from agent_runtime.core.skill.base import SkillManifest
+from agent_runtime.core.skill.loader import MarkdownSkill
+from agent_runtime.core.skill.router import SkillRouter
 from agent_runtime.core.tool.registry import ToolRegistry
 from agent_runtime.core.trace.tracer import Tracer
 from agent_runtime.infrastructure.llm.mock import MockLLMProvider
@@ -42,8 +46,11 @@ def _tc(call_id: str, arguments: str, usage: TokenUsage | None = None) -> LLMRes
     )
 
 
-def _setup(script: list[LLMResponse], *, max_steps: int = 15):
-    """真实组件组装：MockLLM + FileReaderTool + 真 ContextManager/MemoryManager/Tracer。"""
+def _setup(script: list[LLMResponse], *, max_steps: int = 15, **agent_kw):
+    """真实组件组装：MockLLM + FileReaderTool + 真 ContextManager/MemoryManager/Tracer。
+
+    `**agent_kw` 透传给 ReActLoop（Phase 3 的 skill_router / planner / skill_top_k 走这里）。
+    """
     root = _new_root()
     (Path(root) / "a.txt").write_text("hello react", encoding="utf-8")
     registry = ToolRegistry()
@@ -58,6 +65,7 @@ def _setup(script: list[LLMResponse], *, max_steps: int = 15):
         memory_manager=memory,
         tracer=tracer,
         max_steps=max_steps,
+        **agent_kw,
     )
     return agent, ctx, memory, tracer, root
 
@@ -234,6 +242,201 @@ async def test_tool_failure_evidence_reaches_the_model():
         assert messages, "Mock LLM 应记录最后一次收到的上下文"
         joined = "\n".join(m.content or "" for m in messages)
         assert "not found" in joined, joined[-400:]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# ── Phase 3：Skill / TaskPlanner 集成 ──
+#
+# 本段钉死 Plan §1.3 的集成契约：技能与计划**只能追加**在硬规则之后（注入安全），
+# 且"这次用了哪个技能"必须可被外部看见（result.skills_used / skill_matched 事件 / trace config）。
+
+SKILL_BODY = "GH-SOP：先 github_get_repo，再 github_list_dir，最后 github_read_file。"
+
+
+class _RaisingLLM:
+    """规划失败用最小假件：TaskPlanner 只调用 `.chat`，无需完整 BaseLLMProvider。"""
+
+    async def chat(self, messages, tools=None):  # type: ignore[no-untyped-def]
+        raise RuntimeError("planner llm down")
+
+
+def _skill(name: str, triggers: list[str], body: str = SKILL_BODY):
+    return MarkdownSkill(
+        manifest=SkillManifest(name=name, description=f"{name} 描述", triggers=triggers),
+        body=body,
+    )
+
+
+def _router(*skills) -> SkillRouter:
+    router = SkillRouter()
+    for s in skills:
+        router.register(s)
+    return router
+
+
+def _sys_prompt(agent) -> str:
+    msgs = agent.llm.last_messages
+    assert msgs and msgs[0].role == "system", "必须真的发出过一次带 system 的请求"
+    return msgs[0].content or ""
+
+
+async def _events(agent, task: str) -> list:
+    return [ev async for ev in agent.run_stream(task)]
+
+
+async def test_matched_skill_is_appended_after_hard_rules():
+    # 注入安全：技能文本**只能追加**，硬规则必须仍在最前面
+    agent, ctx, memory, tracer, root = _setup(
+        [LLMResponse(content="done")],
+        skill_router=_router(_skill("gh", ["代码审查"])),
+    )
+    try:
+        await agent.run("帮我做代码审查")
+        prompt = _sys_prompt(agent)
+        assert prompt.startswith(DEFAULT_SYSTEM_PROMPT), "硬规则必须仍在最前面"
+        assert SKILL_BODY in prompt, "命中的技能正文应被注入"
+        assert prompt.index(SKILL_BODY) > prompt.index("HARD RULES")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_no_match_injects_nothing():
+    # 无命中时 system prompt 与 Phase 1 完全一致 —— 不得出现技能列表之类的额外噪音
+    agent, ctx, memory, tracer, root = _setup(
+        [LLMResponse(content="done")],
+        skill_router=_router(_skill("gh", ["代码审查"])),
+    )
+    try:
+        await agent.run("写一首关于秋天的诗")
+        assert _sys_prompt(agent) == DEFAULT_SYSTEM_PROMPT
+        assert agent.last_result.skills_used == []
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_no_skill_router_is_safe():
+    agent, ctx, memory, tracer, root = _setup([LLMResponse(content="done")])
+    try:
+        result = await agent.run("任意任务")
+        assert result.final_answer == "done"
+        assert result.skills_used == []
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_skill_matched_event_reports_names():
+    agent, ctx, memory, tracer, root = _setup(
+        [LLMResponse(content="done")],
+        skill_router=_router(_skill("gh", ["代码审查"])),
+    )
+    try:
+        events = await _events(agent, "帮我做代码审查")
+        matched = [e for e in events if e.event_type == AgentEventType.SKILL_MATCHED]
+        assert len(matched) == 1, "命中技能应恰好发一次 skill_matched 事件"
+        assert matched[0].data["skills"] == ["gh"]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_no_skill_matched_event_without_match():
+    agent, ctx, memory, tracer, root = _setup(
+        [LLMResponse(content="done")],
+        skill_router=_router(_skill("gh", ["代码审查"])),
+    )
+    try:
+        events = await _events(agent, "写一首关于秋天的诗")
+        assert not [e for e in events if e.event_type == AgentEventType.SKILL_MATCHED]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_skills_used_lists_matched_skills():
+    agent, ctx, memory, tracer, root = _setup(
+        [LLMResponse(content="done")],
+        skill_router=_router(_skill("gh", ["代码审查"])),
+    )
+    try:
+        result = await agent.run("帮我做代码审查")
+        assert result.skills_used == ["gh"]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_trace_session_records_skills():
+    agent, ctx, memory, tracer, root = _setup(
+        [LLMResponse(content="done")],
+        skill_router=_router(_skill("gh", ["代码审查"])),
+    )
+    try:
+        await agent.run("帮我做代码审查")
+        # 直接读真实 tracer 状态（唯一通道：end_session 的返回值被 ReActLoop 内部消费）
+        assert tracer._current_session.config.get("skills") == ["gh"]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_skill_top_k_limits_injection():
+    agent, ctx, memory, tracer, root = _setup(
+        [LLMResponse(content="done")],
+        skill_router=_router(
+            _skill("one_hit", ["代码审查"], body="BODY-ONE"),
+            _skill("two_hits", ["代码审查", "分析仓库"], body="BODY-TWO"),
+        ),
+        skill_top_k=1,
+    )
+    try:
+        await agent.run("代码审查并分析仓库")
+        prompt = _sys_prompt(agent)
+        assert "BODY-TWO" in prompt and "BODY-ONE" not in prompt
+        assert agent.last_result.skills_used == ["two_hits"]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_planner_text_is_injected_after_hard_rules():
+    planner = TaskPlanner(llm=MockLLMProvider([LLMResponse(content="计划：1) 读 README 2) 总结")]))
+    agent, ctx, memory, tracer, root = _setup([LLMResponse(content="done")], planner=planner)
+    try:
+        await agent.run("分析 fastapi 仓库")
+        prompt = _sys_prompt(agent)
+        assert prompt.startswith(DEFAULT_SYSTEM_PROMPT)
+        assert "计划：1) 读 README 2) 总结" in prompt
+        assert prompt.index("计划：1)") > prompt.index("HARD RULES")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_planner_does_not_consume_the_main_script():
+    # 规划器必须用**自己的** LLM 调用；若与主循环共用脚本，第一步就会被计划响应顶掉
+    planner = TaskPlanner(llm=MockLLMProvider([LLMResponse(content="计划文本")]))
+    agent, ctx, memory, tracer, root = _setup(
+        [_tc("c1", '{"path": "a.txt"}'), LLMResponse(content="最终答案")], planner=planner
+    )
+    try:
+        result = await agent.run("读取 a.txt 并总结")
+        assert result.final_answer == "最终答案"
+        assert agent.last_result.steps[0].observation == "hello react"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_no_planner_means_no_plan_text():
+    agent, ctx, memory, tracer, root = _setup([LLMResponse(content="done")])
+    try:
+        await agent.run("分析 fastapi 仓库")
+        assert "计划" not in _sys_prompt(agent)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_planner_failure_is_silent():
+    planner = TaskPlanner(llm=_RaisingLLM())
+    agent, ctx, memory, tracer, root = _setup([LLMResponse(content="done")], planner=planner)
+    try:
+        result = await agent.run("分析 fastapi 仓库")
+        assert result.final_answer == "done", "规划失败不得影响主任务"
+        assert _sys_prompt(agent).startswith(DEFAULT_SYSTEM_PROMPT)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

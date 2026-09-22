@@ -45,3 +45,4 @@ class AgentResult:
     total_latency_ms: int = 0
     trace_id: str = ""
     warning: str | None = None
+    skills_used: list[str] = field(default_factory=list)

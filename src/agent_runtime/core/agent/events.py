@@ -4,6 +4,7 @@ from enum import Enum
 
 class AgentEventType(str, Enum):
     STEP_START = "step_start"
+    SKILL_MATCHED = "skill_matched"
     THOUGHT = "thought"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"

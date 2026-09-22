@@ -47,19 +47,10 @@ class ContextManager:
         task: str,
         tools: list[dict] | None = None,
         memory_entries: list | None = None,
-        skills: list | None = None,
         system_prompt: str | None = None,
     ) -> None:
         self._messages = []
         sys_text = system_prompt or "You are a helpful AI assistant with access to tools."
-        if skills:
-            lines = []
-            for s in skills:
-                if isinstance(s, dict):
-                    lines.append(f"- {s.get('name')}: {s.get('description')}")
-                else:
-                    lines.append(f"- {s.manifest.name}: {s.manifest.description}")
-            sys_text += "\n\nAvailable Skills:\n" + "\n".join(lines)
         if memory_entries:
             sys_text += "\n\nRelevant Memories:\n" + "\n".join(
                 f"- {e.content[:200]}" for e in memory_entries
