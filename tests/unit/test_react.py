@@ -540,6 +540,31 @@ async def test_memory_is_injected_after_skills_and_plan() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+async def test_recall_top_k_is_configurable() -> None:
+    """`MEMORY_RECALL_TOP_K` 曾是完全无效的死配置（react.py 里硬编码 3）—— 这条用例钉住它真的生效。"""
+    layer = _memory_layer()
+    manager = MemoryManager(working=WorkingMemory(), short_term=layer)
+    agent, ctx, mem, tracer, root = _setup(
+        [LLMResponse(content="done")], memory_manager=manager, recall_top_k=1
+    )
+    try:
+        await agent.run("任务")
+        assert layer.queries and layer.queries[0].top_k == 1, layer.queries[0].top_k
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_recall_top_k_defaults_to_three() -> None:
+    layer = _memory_layer()
+    manager = MemoryManager(working=WorkingMemory(), short_term=layer)
+    agent, ctx, mem, tracer, root = _setup([LLMResponse(content="done")], memory_manager=manager)
+    try:
+        await agent.run("任务")
+        assert layer.queries[0].top_k == 3
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 if __name__ == "__main__":
     _failed = []
     for _name, _fn in sorted(globals().items()):

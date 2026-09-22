@@ -119,13 +119,46 @@ def test_trim_keeps_everything_when_under_limit() -> None:
 
 
 def test_trim_zero_or_negative_returns_empty() -> None:
+    """`max_items <= 0` 现在**在构造期就被拒绝**（见下面的 ValueError 用例），
+
+    所以这条改为直接改字段来验证 `trim` 自身的防御性 —— 万一有人绕过校验（反序列化、改字段），
+    `trim` 也不该把"保留全部"当成合法行为。
+    """
     items = [dumps(_entry("m0"))]
-    assert trim(items, ShortTermPolicy(max_items=0)) == []
-    assert trim(items, ShortTermPolicy(max_items=-5)) == []
+    for bad in (0, -5):
+        policy = ShortTermPolicy()
+        policy.max_items = bad  # 绕过 __post_init__，单独验证 trim 的兜底
+        assert trim(items, policy) == []
 
 
 def test_trim_on_empty_list() -> None:
     assert trim([], ShortTermPolicy(max_items=3)) == []
+
+
+def test_policy_rejects_non_positive_ttl() -> None:
+    """`TTL=0` 在 Redis 上是"立刻删键"（写入即消失），必须当场拒绝而不是静默丢数据。"""
+    try:
+        ShortTermPolicy(ttl_seconds=0)
+    except ValueError as e:
+        assert "ttl_seconds" in str(e)
+    else:
+        raise AssertionError("ttl_seconds=0 必须报错")
+
+
+def test_policy_rejects_non_positive_max_items() -> None:
+    """`MAX_ITEMS=0` 在 Redis 上是 `LTRIM 0 -1`（保留全部、无界增长），而本地 trim 返回空 —— 必须拒绝。"""
+    try:
+        ShortTermPolicy(max_items=0)
+    except ValueError as e:
+        assert "max_items" in str(e)
+    else:
+        raise AssertionError("max_items=0 必须报错")
+    try:
+        ShortTermPolicy(max_items=-1)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("max_items 为负必须报错")
 
 
 def _run_all() -> None:

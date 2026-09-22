@@ -317,6 +317,31 @@ def test_never_raises_on_junk_from_layers_or_callers() -> None:
     _run(mgr.consolidate(456))  # type: ignore[arg-type]
 
 
+def test_store_never_summarizes_when_no_persistent_layer() -> None:
+    """两层都关时不调摘要模型：否则每轮任务白烧一次付费 LLM 调用（Phase 4 审查实测）。"""
+    calls = []
+
+    async def summarizer(text: str) -> str:
+        calls.append(text)
+        return "摘要"
+
+    mgr = MemoryManager(working=WorkingMemory(), summarizer=summarizer)
+    _run(mgr.store(MemoryEntry(content="一段任务总结")))
+    assert calls == [], "没有持久层却调用摘要模型 = 花钱不办事"
+
+
+def test_consolidate_never_summarizes_when_no_persistent_layer() -> None:
+    calls = []
+
+    async def summarizer(text: str) -> str:
+        calls.append(text)
+        return "摘要"
+
+    mgr = MemoryManager(working=WorkingMemory(), summarizer=summarizer)
+    _run(mgr.consolidate("一段任务总结"))
+    assert calls == []
+
+
 def _run_all() -> None:
     failed = []
     for name, fn in sorted(globals().items()):

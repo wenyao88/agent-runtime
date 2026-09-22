@@ -95,6 +95,10 @@ def get_memory_manager() -> MemoryManager:
             )
 
     summarizer = _build_summarizer(settings) if settings.memory_consolidate_enabled else None
+    if summarizer is not None and short_term is None and long_term is None:
+        _memory_errors.append(
+            "MEMORY_CONSOLIDATE_ENABLED=true 但两个持久层都未启用：不会调用摘要模型（避免白烧 LLM 调用）"
+        )
     return MemoryManager(short_term=short_term, long_term=long_term, summarizer=summarizer)
 
 
@@ -199,6 +203,7 @@ def get_agent(llm=None) -> ReActLoop:
         skill_router=get_skill_router(),
         planner=planner,
         skill_top_k=s.agent_skill_top_k,
+        recall_top_k=s.memory_recall_top_k,
         tracer=get_tracer(),
         max_steps=s.agent_max_steps,
         tool_timeout=float(s.agent_tool_timeout_seconds),

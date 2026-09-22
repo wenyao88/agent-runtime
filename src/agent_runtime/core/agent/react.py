@@ -54,6 +54,7 @@ class ReActLoop:
         planner: TaskPlanner | None = None,
         skill_top_k: int = 1,
         session_id: str = "",
+        recall_top_k: int = 3,
         tracer: Tracer | None = None,
         max_steps: int = 15,
         tool_timeout: float = 30.0,
@@ -66,6 +67,7 @@ class ReActLoop:
         self.planner = planner
         self.skill_top_k = skill_top_k
         self.session_id = session_id
+        self.recall_top_k = recall_top_k
         self.tracer = tracer
         self.max_steps = max_steps
         self.tool_timeout = tool_timeout
@@ -138,7 +140,7 @@ class ReActLoop:
         memories = []
         if self.memory:
             memories = await self.memory.recall(
-                MemoryQuery(text=task, top_k=3, session_id=sid)
+                MemoryQuery(text=task, top_k=self.recall_top_k, session_id=sid)
             )
 
         await self.ctx.build(

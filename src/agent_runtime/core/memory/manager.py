@@ -114,6 +114,10 @@ class MemoryManager:
         持久层只留摘要后的内容；**工作层留原文**（同会话内召回要的是原始细节）。
         持久内容一律截断并带标记：持久层不该存无界文本。
         """
+        if self.short_term is None and self.long_term is None:
+            # 没有任何持久层：不摘要、不写入。
+            # 否则 `MEMORY_CONSOLIDATE_ENABLED=true` 而两层都关时，每轮任务会白烧一次付费 LLM 调用。
+            return
         text = await self._summarize(str(entry.content or ""))
         if len(text) > MAX_CONSOLIDATE_CHARS:
             text = text[:MAX_CONSOLIDATE_CHARS] + TRUNCATED_MARK

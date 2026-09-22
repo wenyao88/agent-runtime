@@ -31,6 +31,25 @@ class ShortTermPolicy:
     ttl_seconds: int = DEFAULT_TTL_SECONDS
     max_items: int = DEFAULT_MAX_ITEMS
 
+    def __post_init__(self) -> None:
+        """坏值必须**当场报错**，不能带病上线。
+
+        为什么（Phase 4 审查实测）：
+          * `max_items = 0` → 基础设施层发的是 `LTRIM key -0 -1` = `LTRIM key 0 -1`，即**保留全部**
+            （无界增长），而这里 `trim` 却返回 `[]` → 写入成功、召回永远为空，静默而不一致；
+          * `ttl_seconds = 0` → `EXPIRE key 0` 按 Redis 语义**立刻删键** → 每次写入当场消失。
+        两种都不报错，只是"能力悄悄没了"——正是本项目反复要抓的那一类。故在校验点直接拒绝。
+        """
+        if int(self.ttl_seconds) <= 0:
+            raise ValueError(
+                f"ttl_seconds 必须 > 0（当前 {self.ttl_seconds}）：0 会让 Redis 立刻删除该键，写入即消失"
+            )
+        if int(self.max_items) <= 0:
+            raise ValueError(
+                f"max_items 必须 > 0（当前 {self.max_items}）：0 在 Redis 上是 LTRIM 0 -1（保留全部，无界增长），"
+                "而本地 trim 会返回空 —— 写入成功但召回永远为空"
+            )
+
 
 def dumps(entry: MemoryEntry) -> str:
     """序列化成一行 JSON。
