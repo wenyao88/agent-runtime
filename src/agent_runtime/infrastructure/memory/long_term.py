@@ -162,23 +162,44 @@ class PostgresLongTermMemory(BaseMemory):
     async def query(self, query: MemoryQuery) -> list[MemoryEntry]:
         if self._session_factory is None:
             await self.connect()
+
+        # 三种检索方式（缺一不可，本机实测暴露：原先"既无 embedding 又无 text"直接返回空，
+        # 于是 `GET /api/memories?layer=long_term`（不带 query）永远 count=0）：
+        #   1) 已给向量 → 直接用（避免重复计费）
+        #   2) 给了文本 → 现算向量，余弦距离检索
+        #   3) 都没有   → **按时间倒序取最近 N 条**（"看看最近记了什么"是最常见的运维查询）
         if query.embedding is not None:
             vector = self._check_dim(list(query.embedding), where="memory.query")
+            sql = (
+                f"SELECT id, content, role, meta, created_at FROM {self._table} "
+                "WHERE embedding IS NOT NULL "
+                "ORDER BY embedding <=> CAST(:vec AS vector) "
+                "LIMIT :k"
+            )
+            params: dict[str, Any] = {
+                "vec": _vector_literal(vector),
+                "k": int(query.top_k),
+            }
         elif query.text:
             vector = await self._vector_for(query.text, where="memory.query")
-        else:
-            return []
-
-        sql = (
-            f"SELECT id, content, role, meta, created_at FROM {self._table} "
-            "WHERE embedding IS NOT NULL "
-            "ORDER BY embedding <=> CAST(:vec AS vector) "
-            "LIMIT :k"
-        )
-        async with self._session_factory() as session:
-            result = await session.execute(
-                self._stmt(sql), {"vec": _vector_literal(vector), "k": int(query.top_k)}
+            sql = (
+                f"SELECT id, content, role, meta, created_at FROM {self._table} "
+                "WHERE embedding IS NOT NULL "
+                "ORDER BY embedding <=> CAST(:vec AS vector) "
+                "LIMIT :k"
             )
+            params = {"vec": _vector_literal(vector), "k": int(query.top_k)}
+        else:
+            # 不做向量检索：没有查询意图时，"最近写入的"才是最合理的答案
+            sql = (
+                f"SELECT id, content, role, meta, created_at FROM {self._table} "
+                "ORDER BY created_at DESC "
+                "LIMIT :k"
+            )
+            params = {"k": int(query.top_k)}
+
+        async with self._session_factory() as session:
+            result = await session.execute(self._stmt(sql), params)
             rows = list(result.fetchall())
 
         entries: list[MemoryEntry] = []

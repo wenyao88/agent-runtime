@@ -177,12 +177,27 @@ def test_query_skips_rows_without_content() -> None:
     assert [e.content for e in out] == ["有效"]
 
 
-def test_query_without_text_or_embedding_returns_empty_without_sql() -> None:
-    session = FakeSession(rows=[_row()])
+def test_query_without_text_or_embedding_returns_recent_by_time() -> None:
+    """本机实测暴露：不带 `query` 查长期记忆曾永远返回空。
+
+    期望：没有查询意图时按 `created_at` **倒序**取最近 N 条（而不是向量检索、更不是返回空）。
+    """
+    session = FakeSession(rows=[_row(content="最近一条")])
     embedder = FakeEmbedder()
     out = _run(_mem(session, embedder).query(MemoryQuery(text=None, top_k=3)))
-    assert out == []
-    assert session.executed == [] and embedder.calls == []
+    assert [e.content for e in out] == ["最近一条"]
+    sql, params = session.executed[0]
+    assert "created_at DESC" in sql, sql
+    assert "<=>" not in sql, "没有查询意图时不该做向量检索"
+    assert params == {"k": 3}
+    assert embedder.calls == [], "没有文本就不该调 embedding 接口"
+
+
+def test_query_recent_path_keeps_rows_without_embedding() -> None:
+    """按时间取最近时不该要求 embedding 非空（行没算向量也仍然是一条记忆）。"""
+    session = FakeSession(rows=[_row(content="x")])
+    _run(_mem(session).query(MemoryQuery(text=None, top_k=1)))
+    assert "embedding IS NOT NULL" not in session.executed[0][0]
 
 
 # ── store ──
