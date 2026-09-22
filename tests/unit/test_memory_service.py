@@ -203,6 +203,44 @@ def test_list_all_does_not_replay_old_manager_errors() -> None:
     assert body["errors"] == [], body
 
 
+def test_list_passes_session_id_to_the_layer() -> None:
+    """API 必须能定位到真实会话：短时记忆按 `session_id` 存，不带就只能看 `default`。"""
+
+    class SessionLayer(FakeLayer):
+        def __init__(self):
+            super().__init__()
+            self.session_ids: list = []
+
+        async def query(self, query: MemoryQuery):
+            self.session_ids.append(query.session_id)
+            return []
+
+    layer = SessionLayer()
+    manager = MemoryManager(working=WorkingMemory(), short_term=layer)
+    _run(list_memories(manager, query="x", top_k=1, layer="short_term", session_id="s9"))
+    assert layer.session_ids == ["s9"]
+
+
+def test_clear_passes_session_id_and_tolerates_layers_without_it() -> None:
+    """Redis 的 `clear` 接受会话；PG 的 `clear` 是全表清空（无参）—— 两者都不能 500。"""
+
+    class SessionClearLayer(FakeLayer):
+        def __init__(self):
+            super().__init__()
+            self.cleared_with: list = []
+
+        async def clear(self, session_id=None):  # type: ignore[override]
+            self.cleared_with.append(session_id)
+
+    short = SessionClearLayer()
+    long_ = FakeLayer()  # 其 clear() 不接受参数
+    manager = MemoryManager(working=WorkingMemory(), short_term=short, long_term=long_)
+    body = _run(clear_memories(manager, session_id="s9"))
+    assert short.cleared_with == ["s9"]
+    assert long_.cleared == 1, "不接受会话参数的层仍应被清空"
+    assert body["long_term"]["ok"] is True, body
+
+
 def _run_all() -> None:
     failed = []
     for name, fn in sorted(globals().items()):

@@ -34,15 +34,24 @@ async def get_memories(
     query: str = "",
     top_k: int = Query(default=5, ge=1, le=50),
     layer: str = LAYER_ALL,
+    session_id: str = "",
     manager: MemoryManager = Depends(get_memory_manager),
 ) -> dict:
-    body = await list_memories(manager, query=query, top_k=top_k, layer=layer)
+    body = await list_memories(
+        manager, query=query, top_k=top_k, layer=layer, session_id=session_id
+    )
     return {"settings": _settings_view(manager), **body}
 
 
 @router.delete("/memories")
 async def delete_memories(
+    session_id: str = "",
     manager: MemoryManager = Depends(get_memory_manager),
 ) -> dict:
-    result = await clear_memories(manager)
+    """清空指定会话（缺省 `default`）的短时记忆 + 全表清空长期记忆。
+
+    必须能带 `session_id`：WS 用 `/ws/agent/{session_id}`、chat 用 `ChatRequest.session_id`，
+    而短时记忆是**按会话**存的 —— 不带就只能清到 `default`，对真实会话是空操作（Phase 4 审查发现）。
+    """
+    result = await clear_memories(manager, session_id=session_id)
     return {"settings": _settings_view(manager), "cleared": result}
