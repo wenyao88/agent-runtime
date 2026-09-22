@@ -19,7 +19,20 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
 
-_SKIP_DIRS = {"node_modules", ".git", ".testtmp", "__pycache__", ".venv", "dist", "build"}
+_SKIP_DIRS = {
+    "node_modules",
+    ".git",
+    ".testtmp",
+    "__pycache__",
+    ".venv",
+    "dist",
+    "build",
+    # 本机缓存/包存储：内容不属于仓库（已 gitignore），但会让扫描从 7567 个文件变成几秒级
+    ".pnpm-store",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+}
 
 # 被外部工具按 **locale 编码** 读取的配置类文件：必须纯 ASCII
 LOCALE_READ_SUFFIXES = (".ini", ".cfg", ".conf", ".mako")

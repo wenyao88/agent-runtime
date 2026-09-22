@@ -178,7 +178,12 @@ def test_non_numeric_vector_raises() -> None:
 
 
 def test_error_message_never_leaks_api_key() -> None:
-    """密钥绝不进错误信息 —— 错误会被写进日志与 trace。"""
+    """密钥绝不进错误信息 —— 错误会被写进日志与 trace。
+
+    注意必须**断言确实抛了错**：否则实现一旦退化成"静默返回空向量"，这条用例会因为
+    "没有错误信息可以检查"而假绿（Phase 4 审查指出的弱断言）。
+    """
+    raised = 0
     for client in (
         StubClient(status=500, payload={}),
         StubClient(raises=FakeTimeout("boom")),
@@ -187,7 +192,9 @@ def test_error_message_never_leaks_api_key() -> None:
         try:
             _embed(_embedder(client), ["x"])
         except EmbeddingError as e:
+            raised += 1
             assert "sk-secret-value" not in str(e), str(e)
+    assert raised == 3, "三条失败路径都必须抛 EmbeddingError（否则本用例什么都没验证）"
 
 
 def test_missing_httpx_gives_readable_error() -> None:

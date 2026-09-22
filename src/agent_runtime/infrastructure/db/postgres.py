@@ -29,12 +29,16 @@ def create_engine_and_sessionmaker(dsn: str) -> tuple[Any, Any]:
 
 async def ping(engine: Any) -> None:
     """探活：连不上时抛 `DatabaseUnavailable`（消息里**不含**连接串密码）。"""
-    from sqlalchemy import text
-
     try:
+        from sqlalchemy import text  # 惰性导入：必须放在 try 内，否则缺依赖时抛的是裸 ImportError
+
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
     except DatabaseUnavailable:
         raise
+    except ImportError:
+        raise DatabaseUnavailable(
+            'sqlalchemy 未安装：请先 `pip install "sqlalchemy[asyncio]" asyncpg`'
+        ) from None
     except Exception as e:  # noqa: BLE001 —— 归一为"不可用"
         raise DatabaseUnavailable(f"数据库连接失败：{type(e).__name__}: {e}") from None
