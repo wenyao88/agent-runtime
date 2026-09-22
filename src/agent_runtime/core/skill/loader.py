@@ -60,11 +60,16 @@ class SkillLoader:
             raise SkillFormatError("缺少 front-matter：文件必须以 '---' 开头")
 
         rest = normalized[len(DELIMITER) :].lstrip("\n")
-        end = rest.find("\n" + DELIMITER)
-        if end == -1:
-            raise SkillFormatError("front-matter 未闭合：缺少结束的 '---'")
-        block = rest[:end]
-        body = rest[end + len("\n" + DELIMITER) :].lstrip("\n")
+        if rest.startswith(DELIMITER):
+            # 空 front-matter 块（"---\n---\n正文"）：结束分隔符就在 offset 0，
+            # 下面的 find("\n---") 匹配不到，旧实现会误报「未闭合」——分隔符明明在。
+            block, body = "", rest[len(DELIMITER) :].lstrip("\n")
+        else:
+            end = rest.find("\n" + DELIMITER)
+            if end == -1:
+                raise SkillFormatError("front-matter 未闭合：缺少结束的 '---'")
+            block = rest[:end]
+            body = rest[end + len("\n" + DELIMITER) :].lstrip("\n")
 
         data: dict = {}
         current_key: str | None = None
@@ -85,7 +90,13 @@ class SkillLoader:
                     raise SkillFormatError(
                         f"不支持的缩进结构：{raw_line!r}（仅支持 '- item' 列表项）"
                     )
+                if current_key not in LIST_KEYS:
+                    raise SkillFormatError(
+                        f"{current_key}: 该键只接受单个值，不接受列表"
+                    )
                 item = _strip_quotes(stripped[2:])
+                if item[:1] in ("&", "*"):
+                    raise SkillFormatError(f"{current_key}: 不支持 YAML 锚点/别名 → {item!r}")
                 existing = data.get(current_key)
                 if isinstance(existing, list):
                     existing.append(item)
@@ -109,9 +120,19 @@ class SkillLoader:
             current_key = key
             inline = value.strip()
 
+            if inline[:1] in ("&", "*"):
+                # YAML 锚点/别名：不支持。不拦就会静默变成字符串 "&a [x, y]" —— 一个永远命中不了的 trigger。
+                raise SkillFormatError(
+                    f"{key}: 不支持 YAML 锚点/别名 → {inline!r}；请直接写值"
+                )
             if inline.startswith("{"):
                 raise SkillFormatError(f"{key}: 不支持嵌套映射结构 → {inline!r}")
             if inline.startswith("["):
+                if key not in LIST_KEYS:
+                    # `name: [a, b]` 不拦会变成字符串 "['a', 'b']"：一个永远叫不对的名字。
+                    raise SkillFormatError(
+                        f"{key}: 该键只接受单个值，不接受列表 → {inline!r}"
+                    )
                 if not inline.endswith("]"):
                     raise SkillFormatError(f"{key}: 列表缺少 ']' → {inline!r}")
                 inner = inline[1:-1].strip()
@@ -134,7 +155,10 @@ class SkillLoader:
     def load_file(cls, path: str) -> BaseSkill:
         file_path = Path(path)
         try:
-            text = file_path.read_text(encoding="utf-8")
+            # utf-8-sig：Windows 编辑器（记事本 / PowerShell 5.1）默认写 UTF-8 BOM。
+            # 用纯 "utf-8" 读会留下 BOM，导致 startswith("---") 失败并报出「文件必须以 '---' 开头」
+            # 这种把用户指到反方向的诊断 —— 文件明明以 '---' 开头。
+            text = file_path.read_text(encoding="utf-8-sig")
         except (OSError, UnicodeDecodeError) as e:
             # UnicodeDecodeError 必须一起接住：否则一个二进制文件被误命名成 .md，
             # 就会让 load_directory 直接抛出去，把**同目录下所有好技能一起丢掉**。
@@ -144,12 +168,17 @@ class SkillLoader:
         name = str(data.get("name") or "").strip()
         if not name:
             raise SkillFormatError(f"{file_path.name}: 缺少必填字段 name")
+        description = str(data.get("description") or "").strip()
+        if not description:
+            # 不再悄悄补成「技能 {name}」：计划 §1.1 写的是 name / description 双必填，
+            # 而 description 会出现在 GET /api/skills 里，是给人看的。
+            raise SkillFormatError(f"{file_path.name}: 缺少必填字段 description")
         if not body.strip():
             raise SkillFormatError(f"{file_path.name}: 正文为空（技能没有可注入的指导内容）")
 
         manifest = SkillManifest(
             name=name,
-            description=str(data.get("description") or "").strip() or f"技能 {name}",
+            description=description,
             version=str(data.get("version") or "1.0"),
             triggers=_to_list(data.get("triggers")),
             required_tools=_to_list(data.get("required_tools")),

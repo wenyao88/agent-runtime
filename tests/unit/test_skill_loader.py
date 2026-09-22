@@ -250,6 +250,91 @@ def test_load_directory_reports_duplicate_names() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+# ── 编码与「不支持就报错」的承诺 ──
+#
+# spec §4.5 / 计划 §1.1 / README 都承诺「不支持的形状 → 明确报错并跳过，绝不猜测」。
+# 下面几条是独立审查实测出的反例：它们当时**静默加载**成了错误的值。
+
+
+def test_utf8_bom_file_loads() -> None:
+    """Windows 编辑器（记事本 / PowerShell 5.1 Set-Content）默认带 UTF-8 BOM。
+
+    回归：BOM 会让 `startswith("---")` 失败，然后报「文件必须以 '---' 开头」——
+    文件其实以 '---' 开头，这个诊断把用户指到完全错误的方向。
+    """
+    root = _new_root()
+    try:
+        path = Path(root) / "bom.md"
+        path.write_bytes(GOOD.encode("utf-8-sig"))
+        skill = SkillLoader.load_file(str(path))
+        assert skill.manifest.name == "github_analysis"
+        assert skill.manifest.triggers, "BOM 不应吃掉 triggers"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _load_expect_format_error(content: str) -> str:
+    """写一个 skill 文件并断言它**报错**（返回错误信息，便于断言诊断内容）。"""
+    root = _new_root()
+    try:
+        path = Path(root) / "x.md"
+        path.write_text(content, encoding="utf-8")
+        try:
+            SkillLoader.load_file(str(path))
+        except SkillFormatError as e:
+            return str(e)
+        raise AssertionError(f"本应报错，却静默加载了：{content!r}")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_list_value_for_scalar_key_errors() -> None:
+    """`name: [a, b]` 原本会变成字符串 "['a', 'b']" —— 一个永远不会被叫对的名字。"""
+    message = _load_expect_format_error(
+        "---\nname: [a, b]\ndescription: d\n---\n正文\n"
+    )
+    assert "name" in message
+
+
+def test_yaml_anchor_errors() -> None:
+    """`triggers: &a [x, y]` 原本会变成 ['&a [x, y]'] —— 一个永远命中不了的 trigger（技能等于没接）。"""
+    message = _load_expect_format_error(
+        "---\nname: n\ndescription: d\ntriggers: &a [x, y]\n---\n正文\n"
+    )
+    assert "triggers" in message or "锚点" in message or "别名" in message
+
+
+def test_yaml_alias_errors() -> None:
+    message = _load_expect_format_error(
+        "---\nname: n\ndescription: *ref\n---\n正文\n"
+    )
+    assert "description" in message or "别名" in message
+
+
+def test_indented_list_for_scalar_key_errors() -> None:
+    message = _load_expect_format_error(
+        "---\nname: n\ndescription: d\nversion:\n  - 1.0\n---\n正文\n"
+    )
+    assert "version" in message
+
+
+def test_missing_description_errors() -> None:
+    """计划 §1.1 写的是 name / description 双必填；原先缺 description 会被悄悄补成「技能 n」。"""
+    message = _load_expect_format_error("---\nname: nodesc\ntriggers: [x]\n---\n正文\n")
+    assert "description" in message
+
+
+def test_empty_front_matter_block_is_not_reported_as_unclosed() -> None:
+    """`---\\n---\\n正文` 的分隔符是齐的，只是块里没字段。
+
+    旧实现报「front-matter 未闭合：缺少结束的 '---'」—— 分隔符明明在，诊断是错的。
+    正确行为是解析出空块，然后按「缺 name」报错。
+    """
+    data, body = SkillLoader.parse_front_matter("---\n---\n正文\n")
+    assert data == {}
+    assert body.strip() == "正文"
+
+
 def _run_all() -> None:
     tests = [
         v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)

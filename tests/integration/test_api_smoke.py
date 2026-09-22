@@ -22,20 +22,29 @@ def _deps_available() -> bool:
 
 
 def _build_agent():
-    """每个任务一个独立 agent 实例，避免跨用例共享上下文/记忆。"""
+    """每个任务一个独立 agent 实例，避免跨用例共享上下文/记忆。
+
+    带**真实**的 SkillRouter（从仓库 skills/ 目录加载）：这样 /api/chat 与 WS 的
+    skills_used 才能被验证到"非空"的情形 —— 否则把 `skills_used=[]` 写死也照样通过。
+    """
     from agent_runtime.core.agent.react import ReActLoop
     from agent_runtime.core.context.budget import TokenBudget
     from agent_runtime.core.context.manager import ContextManager
     from agent_runtime.core.llm.types import FunctionCall, LLMResponse
     from agent_runtime.core.memory.manager import MemoryManager
     from agent_runtime.core.memory.working import WorkingMemory
+    from agent_runtime.core.skill.router import SkillRouter
     from agent_runtime.core.tool.registry import ToolRegistry
     from agent_runtime.core.trace.tracer import Tracer
     from agent_runtime.infrastructure.llm.mock import MockLLMProvider
+    from agent_runtime.infrastructure.skills.catalog import register_skills_from_dir
     from agent_runtime.infrastructure.tools.file_reader import FileReaderTool
 
     registry = ToolRegistry()
     registry.register(FileReaderTool(root=str(_PROJECT_ROOT)))
+    skills = SkillRouter()
+    errors = register_skills_from_dir(skills, str(_PROJECT_ROOT / "skills"))
+    assert errors == [], errors
     llm = MockLLMProvider(
         [
             LLMResponse(
@@ -52,9 +61,14 @@ def _build_agent():
         tool_registry=registry,
         context_manager=ContextManager(budget=TokenBudget()),
         memory_manager=MemoryManager(working=WorkingMemory()),
+        skill_router=skills,
         tracer=Tracer(),
         max_steps=5,
     )
+
+
+# 命中 github_analysis 的中文任务（trigger 含「代码结构」）
+TASK = "看看 fastapi/fastapi 的代码结构，并读取 计划.md"
 
 
 def test_chat_and_ws_smoke() -> None:
@@ -83,13 +97,13 @@ def test_chat_and_ws_smoke() -> None:
         # with 形式才会真正执行 lifespan（MCP 发现）
         with TestClient(app) as client:
             # ── REST: POST /api/chat ──
-            resp = client.post("/api/chat", json={"task": "读取 计划.md"})
+            resp = client.post("/api/chat", json={"task": TASK})
             assert resp.status_code == 200, resp.text
             body = resp.json()
             assert body["final_answer"] == "最终答案：已读取", body
             assert body["steps"] >= 1, body
             assert body["total_tokens"]["total"] >= 0, body
-            assert body["skills_used"] == [], "未注入 skill_router 时不应报告任何技能"
+            assert body["skills_used"] == ["github_analysis"], body
 
             # ── REST: GET /api/tools（原生工具目录）──
             tools_resp = client.get("/api/tools")
@@ -115,7 +129,7 @@ def test_chat_and_ws_smoke() -> None:
 
             # ── WebSocket: /ws/agent/{session_id} ──
             with client.websocket_connect("/ws/agent/test-session") as ws:
-                ws.send_json({"type": "task", "task": "读取 计划.md"})
+                ws.send_json({"type": "task", "task": TASK})
                 frames = []
                 while True:
                     frame = ws.receive_json()
@@ -124,7 +138,9 @@ def test_chat_and_ws_smoke() -> None:
                         break
 
             assert frames[-1]["data"]["final_answer"] == "最终答案：已读取", frames[-1]
-            assert frames[-1]["data"]["skills_used"] == [], frames[-1]
+            assert frames[-1]["data"]["skills_used"] == ["github_analysis"], frames[-1]
+            matched = [f for f in frames if f["event_type"] == "skill_matched"]
+            assert matched and matched[0]["data"]["skills"] == ["github_analysis"], frames
             assert any(f["event_type"] == "final_answer" for f in frames), frames
             assert any(
                 f["event_type"] == "tool_result" and f["data"]["success"] for f in frames

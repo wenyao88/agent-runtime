@@ -34,6 +34,11 @@ PLANNER_PROMPT = (
     "任务：{task}"
 )
 
+# ponytail 天花板：计划文本会进入**每一步**请求的 system prompt，长度没有上限就是每一步都在烧钱。
+# 截断必须带标记 —— 本项目在 Demo 1 已经吃过「无标记截断把数据切成看起来完整的样子」的亏。
+MAX_PLAN_CHARS = 2000
+TRUNCATED_MARK = "\n…（计划过长，已截断）"
+
 
 class TaskPlanner:
     """把复杂任务拆成计划**文本**，注入 System Prompt。
@@ -67,4 +72,7 @@ class TaskPlanner:
             return ""
         if not isinstance(text, str):
             return ""
-        return text.strip()
+        text = text.strip()
+        if len(text) > MAX_PLAN_CHARS:
+            return text[:MAX_PLAN_CHARS] + TRUNCATED_MARK
+        return text

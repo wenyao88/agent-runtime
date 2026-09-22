@@ -125,6 +125,13 @@ def test_list_all_returns_manifests_in_registration_order() -> None:
     assert all(isinstance(m, SkillManifest) for m in manifests)
 
 
+def test_duplicate_trigger_entries_count_once() -> None:
+    """`triggers: [x, x]` 是手写 md 的常见复制粘贴失误；若按条数计分，
+    它会靠"重复"压过真正命中两个不同关键词的技能。"""
+    skill = FakeSkill("dup", ["x", "x"])
+    assert skill.match_score("x") == 1
+
+
 def test_duplicate_name_is_ignored() -> None:
     """同名技能只保留第一个：否则重复装配（如 lifespan 跑两次）会让技能列表与注入内容翻倍。
 

@@ -32,7 +32,9 @@ class BaseSkill(ABC):
         """
         task_lower = (task or "").lower()
         score = 0
-        for trigger in self.manifest.triggers:
+        # dict.fromkeys 去重：手写 md 里 `triggers: [x, x]` 是常见的复制粘贴失误，
+        # 按条数计分会让它靠"重复"压过真正命中两个不同关键词的技能。
+        for trigger in dict.fromkeys(self.manifest.triggers):
             needle = trigger.strip().lower()
             if needle and needle in task_lower:
                 score += 1

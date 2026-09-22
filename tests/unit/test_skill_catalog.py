@@ -64,6 +64,15 @@ def test_absolute_skills_dir_is_kept() -> None:
 # ── 注册 ──
 
 
+def test_blank_skills_dir_is_reported_as_skipped() -> None:
+    """`SKILLS_DIR=`（空值）若被当成"项目根"，就会去 glob 仓库根目录并报一堆
+    「README.md: 缺少 front-matter」——看起来像技能全坏了，实际是配置为空。"""
+    router = SkillRouter()
+    errors = register_skills_from_dir(router, "")
+    assert router.is_empty() is True
+    assert errors and "为空" in errors[0], errors
+
+
 def test_registers_every_skill_in_dir() -> None:
     root = _new_root()
     try:

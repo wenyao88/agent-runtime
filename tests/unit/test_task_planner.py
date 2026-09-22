@@ -123,6 +123,23 @@ def test_non_string_content_returns_empty_string() -> None:
     assert asyncio.run(_planner(llm).plan("t", TOOLS)) == ""
 
 
+def test_overlong_plan_is_capped_and_marked() -> None:
+    """计划文本会进入**每一步**请求的 system prompt，长度没有上限就是每一步都在烧钱。
+
+    截断必须带标记：本项目在 Demo 1 已经吃过「无标记截断把数据切成看起来完整的样子」的亏。
+    """
+    long_plan = "步骤 " * 2000
+    llm = MockLLMProvider([LLMResponse(content=long_plan)])
+    result = asyncio.run(_planner(llm).plan("t", TOOLS))
+    assert len(result) <= 2100, len(result)
+    assert "截断" in result
+
+
+def test_plan_within_limit_is_untouched() -> None:
+    llm = MockLLMProvider([LLMResponse(content=PLAN)])
+    assert asyncio.run(_planner(llm).plan("t", TOOLS)) == PLAN
+
+
 def _run_all() -> None:
     tests = [
         v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)
