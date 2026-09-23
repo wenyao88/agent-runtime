@@ -36,6 +36,17 @@ class MCPError(Exception):
     """MCP 协议层/传输层错误（调用方一律转成可读 ToolResult）。"""
 
 
+def _as_error_text(text: str) -> str:
+    """失败文本统一带**一次** `Error: ` 前缀（项目口径），但绝不叠加。
+
+    远端 server 常按同一口径返回（本仓库自研的 MCP Server、`file_reader` 都是
+    `Error: file not found: …`）；无条件再拼一次会得到 `Error: Error: …` 给模型看 ——
+    既多一层噪声，也破坏了"失败文本以 `Error: ` 开头 → 是失败"这条到处在用的判据。
+    """
+    stripped = (text or "").lstrip()
+    return stripped if stripped.startswith("Error:") else f"Error: {text}"
+
+
 @dataclass
 class MCPServerConfig:
     name: str
@@ -292,7 +303,7 @@ class MCPClient:
         return ToolResult(
             tool_name=tool_name,
             success=not is_error,
-            text=out if not is_error else f"Error: {out}",
+            text=out if not is_error else _as_error_text(out),
             data={"content": content, "server": server},
             metadata={"truncated": truncated, "server": server},
         )

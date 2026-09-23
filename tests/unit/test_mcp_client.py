@@ -241,6 +241,38 @@ def test_call_tool_transport_error_is_readable_failure() -> None:
     assert "server exploded" in result.text
 
 
+def test_call_tool_does_not_double_the_error_prefix() -> None:
+    """`Error: ` 是**一次**前缀，不是叠加的（T7/T8 审查发现）。
+
+    远端 server 常按同一口径返回（本仓库自研的 MCP Server 与 `file_reader` 都是
+    `Error: file not found: …`），无条件再拼一次就变成 `Error: Error: …` —— 模型看到的是噪声，
+    而且"错误文本以 Error: 开头"这条口径在项目里到处被当作判据。
+    """
+    transport = FakeTransport(
+        call_result={
+            "content": [{"type": "text", "text": "Error: file not found: 'a.txt'"}],
+            "isError": True,
+        }
+    )
+    client, _ = _client(transport)
+    asyncio.run(client.connect(_cfg("fs")))
+    result = asyncio.run(client.call_tool("fs", "read_file", {}))
+    assert result.success is False
+    assert result.text == "Error: file not found: 'a.txt'", result.text
+    assert not result.text.startswith("Error: Error:"), result.text
+
+
+def test_call_tool_still_adds_the_prefix_when_the_server_omits_it() -> None:
+    """反面：远端只给 `boom`（不带前缀）时，本层仍要补上 —— 修 bug 不能把这条口径也改掉。"""
+    transport = FakeTransport(
+        call_result={"content": [{"type": "text", "text": "boom"}], "isError": True}
+    )
+    client, _ = _client(transport)
+    asyncio.run(client.connect(_cfg("fs")))
+    result = asyncio.run(client.call_tool("fs", "read_file", {}))
+    assert result.text == "Error: boom", result.text
+
+
 def test_call_tool_truncates_long_text() -> None:
     long_text = "x" * 5000
     transport = FakeTransport(
