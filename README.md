@@ -6,7 +6,7 @@ Context Manager / Context Compaction / Agent Trace**，并以两个真实场景�
 ```
 ReAct → Function Calling → Tool Registry → MCP → Skills
 → Memory (Working / Short-term / Long-term) → Context Manager
-→ Context Compaction (Squeeze / Truncate) → Trace
+→ Context Compaction (Squeeze / Summarize / Truncate) → Trace
 ```
 
 ## 架构
@@ -183,6 +183,30 @@ alembic upgrade head
 
 任一层不可用只记错误、不阻断任务：装配期错误进 `app.state.memory_errors`（`GET /api/memories` 的
 `settings.errors` 也能看到），运行期错误进 `MemoryManager.errors`。
+
+## 上下文压缩（超预算自动触发）
+
+每次工具结果之后检查上下文占用（触发阈值 = `AGENT_CONTEXT_COMPACTION_THRESHOLD` × 可用预算），按顺序**逐级**处理：
+
+| 顺序 | 策略 | 做什么 | 代价 |
+|---|---|---|---|
+| 1 | SQUEEZE | 就地压缩过长的工具结果（头 200 + 标记 + 尾 100），协议字段不动 | 免费，信息损失小 |
+| 2 | SUMMARIZE | 用 JUDGE_LLM 把"保留窗口之外的早期对话"压成一条带标记的摘要 | 一次 LLM 调用 |
+| 3 | TRUNCATE | 直接丢弃最旧消息（保留 system + 当前任务 + 最近 6 条） | 免费，但丢信息 |
+
+顺序的理由：**必须在下手丢消息之前决定要不要摘要** —— TRUNCATE 一跑，要被摘要的素材就没了。
+
+```bash
+# .env：SUMMARIZE 默认关（需要 JUDGE_LLM_API_KEY；关闭时超预算直接丢弃最旧消息）
+AGENT_COMPACTION_SUMMARIZE_ENABLED=false
+AGENT_CONTEXT_COMPACTION_THRESHOLD=0.8
+```
+
+摘要消息形如 `[对话摘要 · 已压缩 N 条早期消息]`，插在当前任务之后、最近消息之前；摘要器缺省、调用失败或返回空
+都会**如实降级为 TRUNCATE**，并在 `compaction` 事件里带上 `degraded_from` 与原因（不静默降级）。
+摘要成功后若仍超预算会继续 TRUNCATE，但**已经生成的摘要不会被丢掉**。
+
+天花板：摘要那次 LLM 调用的 token / 时延未计入统计；单次 LLM 摘要**不保证无损**；多轮压缩会逐层叠加摘要。
 
 ## 输出可信度（防幻觉）
 
