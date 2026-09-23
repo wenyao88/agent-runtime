@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import unittest
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -42,8 +43,7 @@ def test_missing_deps_message_names_them() -> None:
     module = _load()
     message = module._require_deps()
     if message is None:
-        print("     (依赖齐备 —— 跳过该分支)")
-        return
+        raise unittest.SkipTest("依赖齐备：该用例只在缺依赖时有意义")
     assert "httpx" in message and "openai" in message
     assert "pip install" in message
 
@@ -51,8 +51,7 @@ def test_missing_deps_message_names_them() -> None:
 def test_main_degrades_readably_without_third_party_deps() -> None:
     module = _load()
     if module._require_deps() is None:
-        print("     (依赖齐备 —— 跳过该分支)")
-        return
+        raise unittest.SkipTest("依赖齐备：该用例只在缺依赖时有意义")
     code = module.main(["--repo", "octocat/Hello-World"])
     assert code == 2, "缺依赖时应以可读提示 + 退出码 2 结束，而不是抛异常"
 
@@ -278,18 +277,31 @@ def test_run_accepts_session_id() -> None:
 
 def test_main_accepts_session_id_flag() -> None:
     module = _load()
+    if module._require_deps() is None:
+        # 依赖齐备时 main() 会真的跑一次任务（真实网络 + LLM），不适合放进单测
+        raise unittest.SkipTest("依赖齐备：该用例只在缺依赖时验证 argparse 通路")
     code = module.main(["--repo", "octocat/Hello-World", "--session-id", "smoke-1"])
     assert code == 2, "参数应被 argparse 接受（缺依赖时以退出码 2 可读结束）"
 
 
 def _run_all() -> None:
+    failed: list[str] = []
     tests = [
         v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)
     ]
     for t in tests:
         print(f"RUN  {t.__name__}")
-        t()
-        print(f"PASS {t.__name__}")
+        try:
+            t()
+        except unittest.SkipTest as e:
+            print(f"SKIP {t.__name__}: {e}")
+        except Exception as e:  # noqa: BLE001
+            print(f"FAIL {t.__name__}: {type(e).__name__}: {e}")
+            failed.append(t.__name__)
+        else:
+            print(f"PASS {t.__name__}")
+    if failed:
+        raise SystemExit(f"FAILED: {', '.join(failed)}")
     print("ALL PASS")
 
 

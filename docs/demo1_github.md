@@ -37,6 +37,8 @@ pip install -e ".[dev]"
 ```bash
 python scripts/run_demo1_github.py --repo fastapi/fastapi
 python scripts/run_demo1_github.py --repo pallets/flask --focus "错误处理与重试"
+# 会话标识：短时记忆按会话隔离（不传则用 default，多会话会互相污染）
+python scripts/run_demo1_github.py --repo fastapi/fastapi --session-id smoke-1
 ```
 
 输出形如：
@@ -65,7 +67,7 @@ description: FastAPI framework, high performance...
 
 | 限制 | 说明 |
 |---|---|
-| 真实 LLM 链路未在受限环境验证 | 开发沙箱没有 pip / httpx / openai，只能验证到"缺依赖 → 可读错误"这一层；真实调用需要在你机器上跑一次 |
+| 真实 LLM 链路 | ✅ **已在用户本机验证**：四个 GitHub 工具真实返回、301 修复生效、全工具失败时模型如实报告；开发沙箱仍只能验证到"缺依赖 → 可读错误"这一层 |
 | `github_search_code` 需要 token | 未配置 token 时工具**不发起请求**直接返回可读错误（该接口未鉴权必然 401） |
 | 只支持公开仓库 | 未实现鉴权私有仓库的完整流程 |
 | 远程 PDF 不支持 | `pdf_read` 目前只读工作区内的本地文件（远程 PDF 需要二进制响应支持） |
@@ -97,3 +99,21 @@ python scripts/run_demo_mock.py
 
 **小模型注意事项**：Qwen3-8B 这类小模型即使有明确指令也更易跑偏。演示时建议用 DeepSeek-V3 / Qwen2.5-72B 级别的模型；
 若坚持用 8B，请看 `warning` 字段，并注意报告里的每条结论是否都能对应到 Step 中的工具返回。
+
+## 8. 与记忆层的配合（Phase 4，默认全关）
+
+Demo 1 的任务结束会把 `task/answer` 摘要写入已启用的记忆层。打开开关后可用会话标识隔离：
+
+```bash
+# .env 里打开（默认全关：没起 DB/Redis 也不影响运行）
+#   MEMORY_SHORT_TERM_ENABLED=true
+#   MEMORY_LONG_TERM_ENABLED=true    # 需要 EMBEDDING_API_KEY + alembic upgrade head
+
+python scripts/run_demo1_github.py --repo fastapi/fastapi --session-id smoke-1   # 跑两次
+curl "http://127.0.0.1:8000/api/memories?layer=short_term&session_id=smoke-1"    # 应看到 source=short_term
+curl "http://127.0.0.1:8000/api/memories?layer=long_term"                        # 不带 query：按时间取最近
+curl -X DELETE "http://127.0.0.1:8000/api/memories?session_id=smoke-1"           # 只清该会话
+```
+
+**本机已验证**：同会话两次任务 → `short_term count: 2`；`DELETE` 后 `count: 0`；长期记忆写入 + 带 query 的向量检索命中；
+不带 query 时按时间倒序返回最近 N 条。**未验证**：`docker compose` 全链路（本机拉不下基础镜像）。

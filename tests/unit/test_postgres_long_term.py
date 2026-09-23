@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import unittest
 from datetime import datetime
 from pathlib import Path
 
@@ -281,14 +282,16 @@ def test_embedder_failure_propagates_for_the_manager_to_record() -> None:
 
 
 def test_missing_sqlalchemy_gives_readable_error() -> None:
-    """真实路径（本沙箱确实没装 SQLAlchemy）：惰性导入失败要变成可读错误。"""
+    """真实路径（本沙箱确实没装 SQLAlchemy）：惰性导入失败要变成可读错误。
+
+    装了 SQLAlchemy 的环境必须**跳过**而不是 `return`（后者报绿却零断言）。
+    """
     try:
         import sqlalchemy  # noqa: F401
     except ImportError:
         pass
     else:
-        print("     (装了 sqlalchemy —— 跳过该分支)")
-        return
+        raise unittest.SkipTest("sqlalchemy 已安装：该用例只在缺依赖时有意义")
     mem = PostgresLongTermMemory(dsn="postgresql+asyncpg://x/y", embedder=FakeEmbedder(), dimension=DIM)
     try:
         _run(mem.connect())
@@ -305,6 +308,8 @@ def _run_all() -> None:
             print(f"RUN  {name}")
             try:
                 fn()
+            except unittest.SkipTest as e:
+                print(f"SKIP {name}: {e}")
             except Exception as e:  # noqa: BLE001
                 print(f"FAIL {name}: {type(e).__name__}: {e}")
                 failed.append(name)

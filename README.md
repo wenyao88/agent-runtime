@@ -161,6 +161,13 @@ docker compose up -d          # api 启动时会自动执行 alembic upgrade hea
 alembic upgrade head
 ```
 
+> **本机实测状态**：迁移（`alembic upgrade head` / `downgrade base`）、长期记忆写入、向量检索、
+> 无 query 时按时间取最近、Redis 短时记忆（同会话两次任务 → `count: 2`；`DELETE` 后 `count: 0`）、
+> C1 错误可见性（维度不匹配 / 401 / 表不存在都能报出）**均已在本机验证通过**。
+> **未验证**：`docker compose` 全链路 —— 本机网络拉不下 `python:3.12-slim`；可用
+> `docker build --build-arg PYTHON_IMAGE=<本地已有镜像>`（或 compose 的 `build.args`）绕开，
+> 或直接用本机 uvicorn + 已起的 postgres/redis 做等价验证。
+
 **任一层不可用只记错误、不阻断启动与任务**：装配期错误进 `app.state.memory_errors`（`GET /api/memories` 的
 `settings.errors` 也能看到），运行期错误进 `MemoryManager.errors`（有上限，manager 是进程单例）。这是刻意的：
 `ReActLoop` 结尾写记忆的那一步**没有 try 保护**，所以"记忆写失败"必须由记忆层自己咽下去。
@@ -197,6 +204,8 @@ Relevant Memories:
 ```bash
 python scripts/run_demo1_github.py --repo fastapi/fastapi
 python scripts/run_demo1_github.py --repo pallets/flask --focus "错误处理与重试"
+# 会话标识：短时记忆按会话隔离，不传则全部落在 default
+python scripts/run_demo1_github.py --repo fastapi/fastapi --session-id smoke-1
 ```
 
 详见 `docs/demo1_github.md`；Demo 2（技术调研）骨架见 `docs/demo2_research.md`。

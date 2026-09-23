@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -198,14 +199,17 @@ def test_error_message_never_leaks_api_key() -> None:
 
 
 def test_missing_httpx_gives_readable_error() -> None:
-    """真实路径（本沙箱确实没装 httpx）：惰性导入失败要变成可读错误，而不是 ImportError 栈。"""
+    """真实路径（本沙箱确实没装 httpx）：惰性导入失败要变成可读错误，而不是 ImportError 栈。
+
+    装了 httpx 的环境（用户机器）必须**跳过**而不是 `return` —— 后者会打印 PASS 但什么都没断言，
+    等于"测试在撒谎"（Phase 4 审查指出的弱断言）。
+    """
     try:
         import httpx  # noqa: F401
     except ImportError:
         pass
     else:
-        print("     (装了 httpx —— 跳过该分支)")
-        return
+        raise unittest.SkipTest("httpx 已安装：该用例只在缺依赖时有意义")
     try:
         _embed(_embedder(None), ["x"])
     except EmbeddingError as e:
@@ -228,6 +232,8 @@ def _run_all() -> None:
             print(f"RUN  {name}")
             try:
                 fn()
+            except unittest.SkipTest as e:
+                print(f"SKIP {name}: {e}")
             except Exception as e:  # noqa: BLE001
                 print(f"FAIL {name}: {type(e).__name__}: {e}")
                 failed.append(name)
