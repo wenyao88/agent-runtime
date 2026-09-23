@@ -445,6 +445,45 @@ def test_format_context_errors_marks_each_problem() -> None:
     assert "⚠" in text and "上下文" in text and "缺 key" in text
 
 
+def test_format_compaction_shows_tokens_and_strategy() -> None:
+    module = _load()
+    line = module.format_compaction(
+        {"before": 100, "after": 40, "strategy": "truncate", "summarized": 0,
+         "degraded_from": None, "reason": ""}
+    )
+    assert "100" in line and "40" in line and "truncate" in line
+    assert "⚠" not in line and "摘要" not in line
+
+
+def test_format_compaction_shows_the_summary_count() -> None:
+    module = _load()
+    line = module.format_compaction(
+        {"before": 100, "after": 30, "strategy": "summarize", "summarized": 5,
+         "degraded_from": None, "reason": ""}
+    )
+    assert "summarize" in line
+    assert "摘要 5 条" in line, line
+
+
+def test_format_compaction_surfaces_the_degradation() -> None:
+    """事件早带上了降级信息，CLI 却只打印策略 —— 又是一次"机制做了、展示层藏起来"。"""
+    module = _load()
+    line = module.format_compaction(
+        {"before": 100, "after": 20, "strategy": "truncate", "summarized": 0,
+         "degraded_from": "summarize", "reason": "未配置摘要器"}
+    )
+    assert "⚠" in line and "summarize" in line and "未配置摘要器" in line, line
+
+
+def test_format_compaction_tolerates_a_missing_reason() -> None:
+    module = _load()
+    line = module.format_compaction(
+        {"before": 1, "after": 1, "strategy": "truncate", "summarized": 0,
+         "degraded_from": "summarize", "reason": ""}
+    )
+    assert "⚠" in line and "未说明" in line, line
+
+
 def _run_all() -> None:
     failed: list[str] = []
     tests = [

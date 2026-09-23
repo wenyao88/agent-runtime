@@ -71,6 +71,19 @@ def format_skills(skills_used: object) -> str:
     return f"🎯 命中技能：{', '.join(names)}"
 
 
+def format_compaction(data: dict) -> str:
+    """压缩事件的可视化一行：策略 + 前后 token，并如实带上摘要条数与降级原因。
+
+    事件里早就有这些字段了，CLI 却只打印 `strategy` —— 又是一次"机制做了、展示层藏起来"。
+    """
+    line = f"⚡ 压缩 {data.get('before')} → {data.get('after')}（{data.get('strategy')}）"
+    if data.get("summarized"):
+        line += f" · 摘要 {data['summarized']} 条"
+    if data.get("degraded_from"):
+        line += f" · ⚠ 降级自 {data['degraded_from']}：{data.get('reason') or '未说明'}"
+    return line
+
+
 def _format_problems(label: str, problems: object) -> str:
     items = [str(e) for e in (problems or [])]
     if not items:
@@ -243,7 +256,7 @@ async def run(repo: str, focus: str, session_id: str = "") -> int:
             body = format_tool_result(str(data.get("result", "")))
             print(f"📋 [{flag} {data.get('latency_ms', 0)}ms] {body}")
         elif kind == "compaction":
-            print(f"⚡ 压缩 {data['before']} → {data['after']}（{data['strategy']}）")
+            print(format_compaction(data))
         elif kind == "skill_matched":
             line = format_skills(data.get("skills"))
             if line:
