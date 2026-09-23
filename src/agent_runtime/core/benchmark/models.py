@@ -62,6 +62,9 @@ class TaskRun:
     error: str = ""
     """该任务自身抛异常时记在这里 —— 整轮评测**不因此中断**。"""
 
+    error_kind: str = ""
+    """`""` / `"provider"` / `"task"`：区分"provider 抽风"与"agent 做错了"（见 `errors.py`）。"""
+
 
 @dataclass
 class TaskVerdict:
@@ -84,6 +87,7 @@ class TaskVerdict:
     total_tokens: int = 0
     latency_ms: int = 0
     error: str = ""
+    error_kind: str = ""
     judge_scores: dict[str, int] | None = None
     judge_reason: str = ""
 
@@ -98,6 +102,14 @@ class BenchmarkMetrics:
     否则崩掉的任务会以 0 步 0 token 的形式把均值拉低，等于拿 0 冒充测量值。"""
 
     success_rate: float | None = None
+    success_rate_measured: float | None = None
+    """"排除 provider 抽风"之后的成功率（分母 = 任务数 − provider 错误数）。
+
+    真实消融看这个数：300 次调用里必然夹着限流/超时，那些不是 agent 的成绩。
+    `success_rate` 保持原口径（所有任务都算），两个一起给，谁都别想藏。"""
+
+    provider_errors: int = 0
+    """被判为 provider/网络错误（限流、超时、连接失败）的任务数。"""
     tool_selection_accuracy: float | None = None
     tool_argument_accuracy: float | None = None
     avg_steps: float | None = None

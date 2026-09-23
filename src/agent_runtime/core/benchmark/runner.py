@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Any
 
 from ..agent.base import AgentResult
+from .errors import classify_error
 from .evaluator import evaluate
 from .metrics import summarize
 from .models import (
@@ -156,8 +157,11 @@ class BenchmarkRunner:
                 run.result = result
             else:
                 run.error = "agent 没有产出 AgentResult"
+                run.error_kind = "task"
         except Exception as e:  # noqa: BLE001 —— 单条任务失败绝不中断整轮评测
             run.error = f"{type(e).__name__}: {e}"
+            # 限流/超时是 provider 抽风，不是 agent 做错了（300 次真实调用必然撞上）
+            run.error_kind = classify_error(e)
         return run
 
     @staticmethod

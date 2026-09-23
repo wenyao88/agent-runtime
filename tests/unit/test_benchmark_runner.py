@@ -299,6 +299,33 @@ def test_a_raising_evaluator_does_not_abort_the_run() -> None:
     ]
 
 
+def test_a_rate_limit_error_is_marked_as_a_provider_error() -> None:
+    """回归（开跑前检查 D）：限流/超时是 **provider 抽风**，不是 agent 做错了。
+
+    不分开统计，三组的成功率就是被限流噪声污染的数字（300 次真实调用必然撞限流）。
+    """
+    rate_limit = type("RateLimitError", (Exception,), {})
+
+    def factory(task: BenchmarkTask):
+        raise rate_limit("rate limit reached for RPM")
+
+    report = asyncio.run(BenchmarkRunner(factory, run_id_factory=lambda cfg: "r").run([_task("a")]))
+    verdict = report.verdicts[0]
+    assert verdict.error_kind == "provider"
+    assert report.metrics.provider_errors == 1
+    assert report.metrics.success_rate == 0.0, "原口径不变：没跑出结果的算失败"
+    assert report.metrics.success_rate_measured is None, "排除 provider 抽风后分母为 0 → 没测"
+
+
+def test_an_agent_bug_is_not_blamed_on_the_provider() -> None:
+    def factory(task: BenchmarkTask):
+        raise AttributeError("'BenchmarkTask' object has no attribute 'chat'")
+
+    report = asyncio.run(BenchmarkRunner(factory, run_id_factory=lambda cfg: "r").run([_task("a")]))
+    assert report.verdicts[0].error_kind == "task"
+    assert report.metrics.provider_errors == 0
+
+
 def _run_all() -> None:
     failed: list[str] = []
     tests = [

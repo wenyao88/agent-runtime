@@ -43,6 +43,11 @@ def summarize(
         return metrics
 
     metrics.success_rate = _rate(sum(1 for v in verdicts if v.success), len(verdicts))
+    metrics.provider_errors = sum(1 for v in verdicts if v.error_kind == "provider")
+    # 消融看这个：把"provider 抽风"从分母里剔掉（300 次真实调用必然夹着限流/超时）
+    metrics.success_rate_measured = _rate(
+        sum(1 for v in verdicts if v.success), len(verdicts) - metrics.provider_errors
+    )
     metrics.tool_selection_accuracy = _rate(
         sum(1 for v in verdicts if v.required_tools_ok), len(verdicts)
     )

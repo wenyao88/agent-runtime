@@ -35,8 +35,13 @@ def _arguments(result: AgentResult | None, tool: str) -> list[dict]:
 
 def evaluate(task: BenchmarkTask, run: TaskRun) -> TaskVerdict:
     """判一条任务。`success` 的三条判据缺一不可，且每条都能在 verdict 里单独看到。"""
+    error = run.error or ""
     verdict = TaskVerdict(
-        task_id=task.task_id, error=run.error or "", min_steps=task.min_steps
+        task_id=task.task_id,
+        error=error,
+        # 手工构造的 run 可能没标 error_kind：有错就当任务失败，别默认成 provider 抽风
+        error_kind=run.error_kind or ("task" if error else ""),
+        min_steps=task.min_steps,
     )
     result = run.result
     if result is None:

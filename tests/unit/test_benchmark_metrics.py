@@ -38,6 +38,7 @@ def _verdict(
     latency: int = 10,
     scores: dict | None = None,
     error: str = "",
+    error_kind: str = "",
 ) -> TaskVerdict:
     return TaskVerdict(
         task_id=task_id,
@@ -50,6 +51,7 @@ def _verdict(
         latency_ms=latency,
         judge_scores=scores,
         error=error,
+        error_kind=error_kind,
     )
 
 
@@ -235,6 +237,36 @@ def test_all_crashed_gives_none_not_zero() -> None:
     assert metrics.avg_steps is None
     assert metrics.avg_total_tokens is None
     assert metrics.avg_latency_ms is None
+
+
+def test_provider_errors_are_counted_separately() -> None:
+    """开跑前检查 D：限流/超时不能算进"agent 的成功率"。"""
+    metrics = summarize(
+        [
+            _verdict("ok", success=True),
+            _verdict(
+                "limited",
+                success=False,
+                error="RateLimitError: rate limit reached for RPM",
+                error_kind="provider",
+            ),
+            _verdict("bug", success=False, error="AttributeError: x", error_kind="task"),
+        ],
+        [],
+    )
+    assert metrics.tasks_total == 3
+    assert metrics.tasks_errored == 2
+    assert metrics.provider_errors == 1
+    assert metrics.success_rate == 1 / 3, "原口径不变：三组都算"
+    assert metrics.success_rate_measured == 1 / 2, "排除 provider 抽风后：1/2"
+
+
+def test_success_rate_measured_is_none_when_every_task_was_a_provider_error() -> None:
+    metrics = summarize(
+        [_verdict("a", success=False, error="TimeoutError", error_kind="provider")], []
+    )
+    assert metrics.provider_errors == 1
+    assert metrics.success_rate_measured is None, "分母为 0 → 没测，不是 0"
 
 
 def _run_all() -> None:
