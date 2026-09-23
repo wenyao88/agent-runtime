@@ -198,6 +198,48 @@ def test_compression_survives_a_zero_before() -> None:
     assert metrics.compression_by_strategy == {"truncate": None}
 
 
+def test_compaction_event_counts_and_summarizer_cost_are_summed() -> None:
+    """压缩事件数 + 摘要那次额外调用的成本（消融的成本归因就靠这两项）。"""
+    metrics = summarize(
+        [_verdict("a"), _verdict("b")],
+        [
+            _run(
+                "a",
+                compactions=[
+                    CompactionEvent(before=1000, after=800, strategy="squeeze"),
+                    CompactionEvent(
+                        before=1000, after=300, strategy="summarize", summarized=4,
+                        summarizer_tokens=210, summarizer_ms=120,
+                    ),
+                ],
+            ),
+            _run(
+                "b",
+                compactions=[
+                    CompactionEvent(
+                        before=500, after=200, strategy="summarize", summarized=3,
+                        summarizer_tokens=90, summarizer_ms=40,
+                    )
+                ],
+            ),
+        ],
+    )
+    assert metrics.compaction_events == 3
+    assert metrics.compaction_events_by_strategy == {"squeeze": 1, "summarize": 2}
+    assert metrics.summarizer_tokens == 300
+    assert metrics.summarizer_ms == 160
+
+
+def test_no_compaction_events_gives_zero_events_and_zero_cost() -> None:
+    """事件数为 0 是**计数**（可以真是 0），压缩比才是 `None`（没测）—— 两者不能混。"""
+    metrics = summarize([_verdict("a")], [_run("a")])
+    assert metrics.compaction_events == 0
+    assert metrics.compaction_events_by_strategy == {}
+    assert metrics.summarizer_tokens == 0
+    assert metrics.summarizer_ms == 0
+    assert metrics.compression_ratio is None
+
+
 # ── 裁判 ──
 
 

@@ -308,6 +308,76 @@ def test_summarize_failure_degrades_to_truncate_and_says_why() -> None:
     assert not any("旧1" in (m.content or "") for m in messages), "降级后旧消息仍必须被处理掉"
 
 
+def _costing_summarizer(samples: list[tuple[int, int]], reply: str = _SUMMARY_REPLY):
+    """带 `.stats` 的摘要器：第 i 次调用按 `samples[i] = (tokens, ms)` 记账（与真实摘要器同形）。"""
+    stats = {"calls": 0, "total_tokens": 0, "total_ms": 0}
+
+    async def summarizer(text: str) -> str:
+        tokens, ms = samples[min(stats["calls"], len(samples) - 1)]
+        stats["calls"] += 1
+        stats["total_tokens"] += tokens
+        stats["total_ms"] += ms
+        return reply
+
+    summarizer.stats = stats
+    return summarizer
+
+
+def test_a_summarize_pass_reports_what_that_extra_call_cost() -> None:
+    """摘要那一次 LLM 调用是**额外**成本，必须跟着压缩结果报出来（否则消融没法做成本归因）。"""
+    async def run():
+        cm = await _built_with_summarizer(1, _costing_summarizer([(210, 120)]))
+        cm.append(Message(role="assistant", content="旧1"))
+        cm.append(Message(role="assistant", content="旧2"))
+        cm.append(Message(role="assistant", content="最近"))
+        return await cm.compact(strategy=CompactionStrategy.SUMMARIZE)
+
+    result = asyncio.run(run())
+    assert result.strategy is CompactionStrategy.SUMMARIZE
+    assert result.summarized_messages == 2
+    assert result.summarizer_tokens == 210
+    assert result.summarizer_ms == 120
+
+
+def test_the_reported_cost_is_this_pass_only_not_a_running_total() -> None:
+    """同一条会话会压很多次：每次只能报**这一次**的钱。
+
+    报累计值会让汇总指标把同一笔钱重复相加 —— 成本归因直接翻倍。
+    """
+    async def one_pass(cm: ContextManager) -> CompactionResult:
+        cm.append(Message(role="assistant", content="旧"))
+        cm.append(Message(role="assistant", content="最近"))
+        return await cm.compact(strategy=CompactionStrategy.SUMMARIZE)
+
+    async def run():
+        cm = await _built_with_summarizer(1, _costing_summarizer([(210, 120), (90, 40)]))
+        return await one_pass(cm), await one_pass(cm)
+
+    first, second = asyncio.run(run())
+    assert (first.summarizer_tokens, first.summarizer_ms) == (210, 120)
+    assert (second.summarizer_tokens, second.summarizer_ms) == (90, 40), "第二次只报第二次的增量"
+
+
+def test_a_summarizer_without_stats_reports_zero_cost_not_a_degradation() -> None:
+    """第三方注入的摘要器可能不带 `.stats`：只能记 0，**不能**因此假装降级。
+
+    `degraded_reason` 是"想摘要没做成"，而这里摘要明明做成了 —— 两件事不能混。
+    """
+    async def run():
+        cm = await _built_with_summarizer(1, _recording_summarizer([]))
+        cm.append(Message(role="assistant", content="旧1"))
+        cm.append(Message(role="assistant", content="旧2"))
+        cm.append(Message(role="assistant", content="最近"))
+        return await cm.compact(strategy=CompactionStrategy.SUMMARIZE)
+
+    result = asyncio.run(run())
+    assert result.strategy is CompactionStrategy.SUMMARIZE
+    assert result.summarized_messages == 2
+    assert result.summarizer_tokens == 0
+    assert result.summarizer_ms == 0
+    assert result.degraded_from is None and result.degraded_reason == ""
+
+
 def test_summarize_blank_result_degrades_to_truncate() -> None:
     async def run():
         async def blank(text: str) -> str:

@@ -223,6 +223,9 @@ class ReActLoop:
                     ),
                     "reason": cr.degraded_reason,
                     "summarized": cr.summarized_messages,
+                    # 摘要那次额外调用的成本必须发出去：它是消融里"压缩组多花了多少钱"的唯一来源
+                    "summarizer_tokens": cr.summarizer_tokens,
+                    "summarizer_ms": cr.summarizer_ms,
                     # 什么都没改变也要如实报（否则"压不动"看起来像一次成功的压缩）
                     "noop": cr.noop})
 

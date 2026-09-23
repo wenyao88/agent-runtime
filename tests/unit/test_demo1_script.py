@@ -465,6 +465,26 @@ def test_format_compaction_shows_the_summary_count() -> None:
     assert "摘要 5 条" in line, line
 
 
+def test_format_compaction_shows_the_extra_summarizer_cost() -> None:
+    """摘要的额外成本也要打出来 —— 它是"压缩到底多花了多少钱"的唯一现场证据。"""
+    module = _load()
+    line = module.format_compaction(
+        {"before": 100, "after": 30, "strategy": "summarize", "summarized": 5,
+         "degraded_from": None, "reason": "", "summarizer_tokens": 210, "summarizer_ms": 120}
+    )
+    assert "210" in line and "120" in line, line
+
+
+def test_format_compaction_stays_quiet_when_the_cost_is_zero() -> None:
+    """没摘要（或 provider 没报 usage）时不要冒出一串 0：那是噪声，不是信息。"""
+    module = _load()
+    line = module.format_compaction(
+        {"before": 100, "after": 30, "strategy": "summarize", "summarized": 5,
+         "degraded_from": None, "reason": "", "summarizer_tokens": 0, "summarizer_ms": 0}
+    )
+    assert "token" not in line, line
+
+
 def test_format_compaction_surfaces_the_degradation() -> None:
     """事件早带上了降级信息，CLI 却只打印策略 —— 又是一次"机制做了、展示层藏起来"。"""
     module = _load()

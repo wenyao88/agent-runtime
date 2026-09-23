@@ -75,6 +75,16 @@ def summarize(
         )
     metrics.compression_by_strategy = by_strategy
 
+    # 事件**条数**是计数（可以是 0），与"压缩比没测 → None"是两件事
+    metrics.compaction_events = len(all_events)
+    event_counts: dict[str, int] = {}
+    for event in all_events:
+        event_counts[event.strategy] = event_counts.get(event.strategy, 0) + 1
+    metrics.compaction_events_by_strategy = dict(sorted(event_counts.items()))
+    # 摘要那次额外调用的成本：消融要能说"这组多花了多少 token / 多少毫秒"
+    metrics.summarizer_tokens = sum(e.summarizer_tokens for e in all_events)
+    metrics.summarizer_ms = sum(e.summarizer_ms for e in all_events)
+
     # 错误恢复：分母是"发生过工具失败的任务"
     success_by_id = {v.task_id: v.success for v in verdicts}
     failing = [

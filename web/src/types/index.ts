@@ -35,6 +35,12 @@ export type BenchmarkMetrics = {
   avg_latency_ms: number | null;
   compression_ratio: number | null;
   compression_by_strategy: Record<string, number | null>;
+  // 事件数是计数（0 是真值）；摘要成本是"额外花的钱"，0 = 没摘要或 provider 没报 usage。
+  // 这四个字段是 Phase 7 加的：**更早落盘的报告里没有它们**，读出来是 undefined → 显示 `—`。
+  compaction_events?: number;
+  compaction_events_by_strategy?: Record<string, number>;
+  summarizer_tokens?: number;
+  summarizer_ms?: number;
   error_recovery_rate: number | null;
   judged_tasks: number;
   avg_judge_score: number | null;

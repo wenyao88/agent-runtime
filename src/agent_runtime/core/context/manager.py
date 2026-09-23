@@ -52,6 +52,13 @@ from .summarize import (
 Summarizer = Callable[[str], Awaitable[str]]
 
 
+def _int_stat(stats: dict, key: str) -> int:
+    try:
+        return int(stats.get(key, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 class ContextManager:
     def __init__(
         self,
@@ -208,13 +215,18 @@ class ContextManager:
         # 上一轮的摘要要一并喂进去，否则跨多轮压缩会一层层丢信息
         previous = self._pinned_summary
         material = ([previous] if previous else []) + old
+        # 摘要器的累计成本快照：调用前后各读一次，差值才是**这一次**的钱
+        stats = getattr(self._summarizer, "stats", None)
+        before_stats = dict(stats) if isinstance(stats, dict) else None
         try:
             raw = await self._summarizer(
                 SUMMARY_PROMPT.format(text=render_for_summary(material))
             )
         except Exception as e:  # noqa: BLE001 —— 摘要失败绝不能让整轮任务炸掉
+            self._collect_cost(result, stats, before_stats)
             result.degraded_reason = f"摘要失败，降级为丢弃：{type(e).__name__}: {e}"
             return False
+        self._collect_cost(result, stats, before_stats)
 
         if not isinstance(raw, str):
             # 不把非字符串"字符串化"当摘要：那等于往上下文里塞垃圾
@@ -236,6 +248,24 @@ class ContextManager:
         self._messages = head + keep
         result.summarized_messages = len(old)
         return True
+
+    @staticmethod
+    def _collect_cost(
+        result: CompactionResult, stats: object, before_stats: dict | None
+    ) -> None:
+        """把摘要器自报的成本**增量**记到这次压缩上。
+
+        必须是增量：同一条会话会压很多次，报累计值会让汇总指标把同一笔钱重复相加。
+        摘要器不带 `.stats`（第三方注入的 callable）时只能留 0 —— 不估算、也不算降级。
+        """
+        if not isinstance(stats, dict) or not isinstance(before_stats, dict):
+            return
+        result.summarizer_tokens = max(
+            0, _int_stat(stats, "total_tokens") - _int_stat(before_stats, "total_tokens")
+        )
+        result.summarizer_ms = max(
+            0, _int_stat(stats, "total_ms") - _int_stat(before_stats, "total_ms")
+        )
 
     def _squeeze(self) -> int:
         """就地压缩 tool 消息的长文本；返回被压缩的条数。"""

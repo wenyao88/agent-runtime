@@ -4,9 +4,9 @@
 "跑任务 → 事件 → 判分 → 指标 → 报告"这条管线在没有依赖的环境里也能完整跑通并断言 ——
 因此报告里 `provider` 必须是 `mock`，绝不能被当成真实成绩。
 
-[这是夹具，不是测量] 它发出的 `compaction` 事件是**合成的**（固定 1000 → 250），
-目的是让"压缩比"这个指标也有非空值；工具参数直接取任务声明的 `expected_args`，
-所以 mock 跑出来的参数命中率必然是 1.0 —— 真实成绩只能由真实 provider 跑出来。
+[这是夹具，不是测量] 它发出的 `compaction` 事件是**合成的**（固定 1000 → 250，摘要成本固定
+210 token / 120 ms），目的是让"压缩比 + 摘要额外成本"这两个指标也有非空值；工具参数直接取任务声明的
+`expected_args`，所以 mock 跑出来的参数命中率必然是 1.0 —— 真实成绩只能由真实 provider 跑出来。
 """
 from __future__ import annotations
 
@@ -19,6 +19,9 @@ _TOKENS_PER_STEP = 120
 _LATENCY_PER_STEP_MS = 5
 _FAKE_BEFORE = 1000
 _FAKE_AFTER = 250
+_FAKE_SUMMARIZED = 6
+_FAKE_SUMMARIZER_TOKENS = 210
+_FAKE_SUMMARIZER_MS = 120
 
 
 class MockBenchmarkAgent:
@@ -60,11 +63,13 @@ class MockBenchmarkAgent:
             {
                 "before": _FAKE_BEFORE,
                 "after": _FAKE_AFTER,
-                "strategy": "truncate",
-                "summarized": 0,
+                "strategy": "summarize",
+                "summarized": _FAKE_SUMMARIZED,
                 "degraded_from": None,
                 "reason": "",
                 "noop": False,
+                "summarizer_tokens": _FAKE_SUMMARIZER_TOKENS,
+                "summarizer_ms": _FAKE_SUMMARIZER_MS,
             },
         )
 

@@ -49,6 +49,11 @@ class CompactionEvent:
     summarized: int = 0
     noop: bool = False
     degraded_from: str | None = None
+    summarizer_tokens: int = 0
+    """**这一次**摘要调用的额外 token（0 = 没摘要 / provider 没报 usage）。"""
+
+    summarizer_ms: int = 0
+    """这一次摘要调用的额外耗时（毫秒）。"""
 
 
 @dataclass
@@ -117,6 +122,19 @@ class BenchmarkMetrics:
     avg_latency_ms: float | None = None
     compression_ratio: float | None = None
     compression_by_strategy: dict[str, float] = field(default_factory=dict)
+
+    compaction_events: int = 0
+    """压缩事件**条数**（含 `noop`：事件被触发就算一次）。
+
+    这是计数，可以是 0；`compression_ratio` 才是"没测 → None"的那个。两者不能混。"""
+
+    compaction_events_by_strategy: dict[str, int] = field(default_factory=dict)
+
+    summarizer_tokens: int = 0
+    """摘要那几次额外 LLM 调用烧掉的 token 合计（消融要单独归因的"额外成本"）。"""
+
+    summarizer_ms: int = 0
+    """摘要那几次额外 LLM 调用的耗时合计（毫秒）。"""
     error_recovery_rate: float | None = None
     judged_tasks: int = 0
     avg_judge_score: float | None = None

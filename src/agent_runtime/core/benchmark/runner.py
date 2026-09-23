@@ -200,6 +200,8 @@ class BenchmarkRunner:
                     summarized=_as_int(data.get("summarized")),
                     noop=bool(data.get("noop")),
                     degraded_from=data.get("degraded_from") or None,
+                    summarizer_tokens=_as_int(data.get("summarizer_tokens")),
+                    summarizer_ms=_as_int(data.get("summarizer_ms")),
                 )
             )
 

@@ -62,6 +62,7 @@ def _events(*, tool_result: bool = True, compaction: bool = False) -> list[Agent
                 {
                     "before": 1000, "after": 400, "strategy": "truncate",
                     "summarized": 0, "degraded_from": None, "reason": "", "noop": False,
+                    "summarizer_tokens": 210, "summarizer_ms": 120,
                 },
             )
         )
@@ -123,6 +124,18 @@ def test_irrelevant_events_are_ignored() -> None:
     )
     assert report.metrics.compression_ratio is None
     assert report.metrics.error_recovery_rate is None
+
+
+def test_compaction_events_carry_the_summarizer_cost() -> None:
+    """摘要的额外成本要能从事件流一路汇总进指标（否则消融做不了成本归因）。"""
+    agent = _FakeAgent(_events(compaction=True), _result())
+    report = asyncio.run(
+        BenchmarkRunner(lambda task: agent, run_id_factory=lambda cfg: "r").run([_task("a")])
+    )
+    assert report.metrics.compaction_events == 1
+    assert report.metrics.compaction_events_by_strategy == {"truncate": 1}
+    assert report.metrics.summarizer_tokens == 210
+    assert report.metrics.summarizer_ms == 120
 
 
 def test_limit_caps_the_number_of_tasks() -> None:

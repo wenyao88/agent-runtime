@@ -39,10 +39,17 @@ class _FakeProvider:
     def __init__(self, **kwargs: object) -> None:
         self.kwargs = kwargs
         self.calls: list[list] = []
+        self.tokens = 0
+        """每次回复报的 total_tokens；0 = 假装 provider 没报 usage。"""
 
     async def chat(self, messages, tools=None):  # noqa: ANN001
         self.calls.append(list(messages))
-        return types.SimpleNamespace(content="  摘要正文  ")
+        if self.tokens <= 0:
+            return types.SimpleNamespace(content="  摘要正文  ")
+        return types.SimpleNamespace(
+            content="  摘要正文  ",
+            token_usage=types.SimpleNamespace(total_tokens=self.tokens),
+        )
 
 
 def _factory(built: list[dict]):
@@ -119,6 +126,46 @@ def test_prompt_is_decided_by_the_caller() -> None:
     asyncio.run(make("B:{text}")("x"))
     assert provider.calls[0][0].content == "A:x"
     assert provider.calls[1][0].content == "B:x"
+
+
+# ── 成本记账 ──
+
+
+def test_the_summarizer_keeps_its_own_cost_stats() -> None:
+    """摘要调用是**额外**成本（消融要单独归因），所以摘要器自己累计 calls/tokens/ms。
+
+    token 只能来自 provider 报的 usage —— 不在这里"估算"，估出来的数字进了成本表就是假的。
+    """
+    provider = _FakeProvider()
+    provider.tokens = 30
+    fn = build_summarizer(
+        _FakeSettings(judge_llm_api_key="k"), "P: {text}", provider_factory=lambda **kw: provider
+    )
+    assert fn is not None
+    assert dict(fn.stats) == {"calls": 0, "total_tokens": 0, "total_ms": 0}, "初始必须为零"
+
+    asyncio.run(fn("a"))
+    asyncio.run(fn("b"))
+
+    assert fn.stats["calls"] == 2
+    assert fn.stats["total_tokens"] == 60, "每次调用都要累加"
+    assert fn.stats["total_ms"] >= 0
+
+
+def test_tokens_stay_zero_when_the_provider_reports_no_usage() -> None:
+    """provider 不报 usage 时 token 只能是 0 —— 但 `calls` 仍要证明"确实调用过"。"""
+
+    class _NoUsage:
+        async def chat(self, messages, tools=None):  # noqa: ANN001
+            return types.SimpleNamespace(content="摘要")
+
+    fn = build_summarizer(
+        _FakeSettings(judge_llm_api_key="k"), "P: {text}", provider_factory=lambda **kw: _NoUsage()
+    )
+    assert fn is not None
+    asyncio.run(fn("a"))
+    assert fn.stats["calls"] == 1, "调用过就要计数"
+    assert fn.stats["total_tokens"] == 0, "没报 usage 就只能记 0，不许估算"
 
 
 def test_memory_keeps_its_own_prompt_after_sharing_the_plumbing() -> None:

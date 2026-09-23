@@ -81,6 +81,9 @@ def format_compaction(data: dict) -> str:
         line += " · 无可压缩内容（保留窗口本身已超预算）"
     elif data.get("summarized"):
         line += f" · 摘要 {data['summarized']} 条"
+    if data.get("summarizer_tokens") or data.get("summarizer_ms"):
+        # 额外成本如实打出；为 0 时不打（"没摘要/没报 usage"用一串 0 表达只会是噪声）
+        line += f" · 摘要成本 {data.get('summarizer_tokens') or 0} token / {data.get('summarizer_ms') or 0} ms"
     if data.get("degraded_from"):
         line += f" · ⚠ 降级自 {data['degraded_from']}：{data.get('reason') or '未说明'}"
     return line

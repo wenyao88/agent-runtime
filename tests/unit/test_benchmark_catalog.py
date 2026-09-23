@@ -91,6 +91,10 @@ def test_mock_runner_completes_the_whole_task_set_offline() -> None:
     assert metrics.tool_selection_accuracy == 1.0
     assert metrics.tool_argument_accuracy == 1.0, "github 任务声明的 repo 参数应当命中"
     assert metrics.compression_ratio == 0.75, "mock 事件是确定性的"
+    assert metrics.compaction_events == 20, "每条任务一个合成的压缩事件"
+    assert metrics.compaction_events_by_strategy == {"summarize": 20}
+    assert metrics.summarizer_tokens == 210 * 20, "摘要成本也要能从 mock 管线流到指标里"
+    assert metrics.summarizer_ms == 120 * 20
     assert metrics.error_recovery_rate is None, "mock 没有失败的工具调用 → 该指标应为 None"
     assert metrics.avg_steps and metrics.avg_steps > 1
 

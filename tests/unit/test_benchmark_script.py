@@ -48,6 +48,10 @@ def _metrics(**overrides: object):
         "avg_latency_ms": 800.0,
         "compression_ratio": 0.375,
         "compression_by_strategy": {"summarize": 0.5},
+        "compaction_events": 3,
+        "compaction_events_by_strategy": {"summarize": 3},
+        "summarizer_tokens": 300,
+        "summarizer_ms": 160,
         "error_recovery_rate": None,
         "judged_tasks": 0,
         "avg_judge_score": None,
@@ -81,6 +85,21 @@ def test_metrics_show_the_task_count_and_compression() -> None:
     table = module.format_metrics(_metrics())
     assert "20" in table
     assert "37.5%" in table or "0.375" in table
+
+
+def test_metrics_show_compaction_event_counts_and_summarizer_cost() -> None:
+    """压缩事件数与摘要额外成本必须出现在 CLI 表里（消融的成本归因靠它读）。"""
+    module = _load()
+    table = module.format_metrics(_metrics())
+    assert "压缩事件" in table
+    assert "3" in table
+    assert "摘要token" in table or "摘要 token" in table, table
+    assert "300" in table and "160" in table
+    # 旧报告没有这两个字段：必须显示 `—`，不能凭空冒出一个 0
+    old = module.format_metrics(
+        _metrics(compaction_events=None, summarizer_tokens=None, summarizer_ms=None)
+    )
+    assert "—" in old
 
 
 # ── 逐任务明细 ──

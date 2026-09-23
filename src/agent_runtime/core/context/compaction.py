@@ -46,6 +46,15 @@ class CompactionResult:
     必须与"降级"分开：没事可做 ≠ 想做什么没做成。否则 Trace/Benchmark 会把每一次
     "压不动"都统计成一次降级，长任务的统计数字就全错了。"""
 
+    summarizer_tokens: int = 0
+    """**本次**摘要那次 LLM 调用烧掉的 token（不是会话累计）。
+
+    0 的含义有两种，都记在 `degraded_reason` 或"摘要器无 stats"里：没摘要 / provider 没报 usage。
+    摘要器不报 usage 时宁可记 0，也不估算 —— 估算值进了成本表就是假账。"""
+
+    summarizer_ms: int = 0
+    """**本次**摘要调用的墙钟耗时（毫秒），来源同 `summarizer_tokens`。"""
+
     @property
     def saved_tokens(self) -> int:
         return max(0, self.tokens_before - self.tokens_after)

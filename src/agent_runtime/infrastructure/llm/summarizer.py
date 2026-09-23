@@ -10,12 +10,22 @@ prompt 怎么格式化、回复怎么 strip"（与 `RedisShortTermMemory(client=
 """
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ...core.llm.types import Message
 
 Summarizer = Callable[[str], Awaitable[str]]
+
+
+def _usage_tokens(response: Any) -> int:
+    """provider 报的 `total_tokens`；没报就是 0 —— **不估算**（估出来的数字进成本表就是假账）。"""
+    usage = getattr(response, "token_usage", None)
+    try:
+        return int(getattr(usage, "total_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def build_summarizer(
@@ -44,10 +54,19 @@ def build_summarizer(
         timeout=float(getattr(settings, "tool_http_timeout_seconds", 60.0)),
     )
 
+    # 摘要调用是**额外**成本（消融要单独归因）：调用方读 `.stats` 拿增量，
+    # 不必自己去掐表或翻 provider 的响应。
+    stats = {"calls": 0, "total_tokens": 0, "total_ms": 0}
+
     async def summarize(text: str) -> str:
+        started = time.perf_counter()
         resp = await provider.chat(
             [Message(role="user", content=prompt.format(text=text))]
         )
+        stats["calls"] += 1
+        stats["total_tokens"] += _usage_tokens(resp)
+        stats["total_ms"] += int((time.perf_counter() - started) * 1000)
         return (resp.content or "").strip()
 
+    summarize.stats = stats
     return summarize

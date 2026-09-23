@@ -621,8 +621,15 @@ async def test_compaction_event_reports_a_degraded_summary() -> None:
 
 
 async def test_compaction_event_reports_a_successful_summary() -> None:
+    stats = {"calls": 0, "total_tokens": 0, "total_ms": 0}
+
     async def summarizer(text: str) -> str:
+        stats["calls"] += 1
+        stats["total_tokens"] += 210
+        stats["total_ms"] += 120
         return "早期经过：读了一个大文件"
+
+    summarizer.stats = stats
 
     agent, ctx, memory, tracer, root = _setup(
         [_tc("c1", '{"path": "big.txt"}'), LLMResponse(content="最终答案")],
@@ -642,6 +649,8 @@ async def test_compaction_event_reports_a_successful_summary() -> None:
     assert data["reason"] == ""
     assert data["summarized"] >= 1
     assert data["noop"] is False, "真做了摘要就不是 noop"
+    assert data["summarizer_tokens"] == 210, "摘要的额外成本必须进事件（CLI/前端都要看得到）"
+    assert data["summarizer_ms"] == 120
 
 
 async def test_compaction_never_orphans_a_tool_result_from_the_same_batch() -> None:
