@@ -13,6 +13,16 @@ import {
 } from "lucide-react";
 import { WS_BASE_URL } from "../api/client";
 import type { AgentStreamEvent, ChatMessage } from "../types";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
 
 const EXAMPLES = ["读取 src/agent_runtime/core/agent/react.py 并总结", "分析 README.md 的结构"];
 
@@ -142,32 +152,30 @@ function ExecutionCard({ message }: { message: ChatMessage }) {
   if (events.length === 0 && !streaming) return null;
 
   return (
-    <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-slate-600 hover:bg-slate-50"
-      >
-        {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-        <span className="font-medium text-slate-700">执行过程</span>
-        <span className="text-slate-400">
-          {stepCount(events)} 步 · {toolCallCount(events)} 次工具调用
-        </span>
-        {streaming && (
-          <span className="ml-auto flex items-center gap-1 text-blue-600">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />
-            运行中
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <Card className="gap-0 overflow-hidden py-0">
+        <CollapsibleTrigger className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-slate-600 hover:bg-slate-50">
+          {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+          <span className="font-medium text-slate-700">执行过程</span>
+          <span className="text-slate-400">
+            {stepCount(events)} 步 · {toolCallCount(events)} 次工具调用
           </span>
-        )}
-      </button>
-      {open && (
-        <ul className="divide-y divide-slate-100 border-t border-slate-100">
-          {events.map((ev, i) => (
-            <EventRow key={i} ev={ev} />
-          ))}
-        </ul>
-      )}
-    </div>
+          {streaming && (
+            <Badge variant="outline" className="ml-auto gap-1 text-blue-600">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />
+              运行中
+            </Badge>
+          )}
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <ul className="divide-y divide-slate-100 border-t border-slate-100">
+            {events.map((ev, i) => (
+              <EventRow key={i} ev={ev} />
+            ))}
+          </ul>
+        </CollapsibleContent>
+      </Card>
+    </Collapsible>
   );
 }
 
@@ -176,13 +184,17 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
-  const listRef = useRef<HTMLDivElement | null>(null);
+  const transcriptRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => () => socketRef.current?.close(), []);
 
   useEffect(() => {
-    const el = listRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    // ScrollArea 真正的滚动容器是它内部的 viewport（外层 root 自己不滚），
+    // 所以贴底要落到 viewport 上，行为与原来的 scrollTop = scrollHeight 一致。
+    const viewport = transcriptRef.current?.querySelector<HTMLElement>(
+      '[data-slot="scroll-area-viewport"]'
+    );
+    if (viewport) viewport.scrollTop = viewport.scrollHeight;
   }, [messages]);
 
   const patchLastAssistant = (fn: (m: ChatMessage) => ChatMessage) =>
@@ -258,70 +270,96 @@ export default function ChatPage() {
 
   return (
     <div className="flex h-full flex-col">
-      <div ref={listRef} className="flex-1 space-y-4 overflow-auto p-6">
-        {messages.length === 0 && (
-          <div className="mx-auto mt-16 max-w-xl text-center text-slate-500">
-            <Sparkles className="mx-auto mb-3 h-8 w-8 text-slate-400" />
-            <p className="mb-4 text-sm">
-              输入一个任务，Agent 会思考、调用工具，并实时展示每一步执行过程。
-            </p>
-            <div className="flex flex-wrap justify-center gap-2">
-              {EXAMPLES.map((ex) => (
-                <button
-                  key={ex}
-                  type="button"
-                  onClick={() => setInput(ex)}
-                  className="rounded-full border border-slate-300 bg-white px-3 py-1 text-xs text-slate-600 hover:border-slate-400"
-                >
-                  {ex}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {messages.map((m, i) =>
-          m.role === "user" ? (
-            <div key={i} className="flex justify-end">
-              <div className="max-w-[75%] whitespace-pre-wrap rounded-2xl bg-slate-900 px-4 py-2 text-sm text-white">
-                {m.content}
-              </div>
-            </div>
-          ) : (
-            <div key={i} className="flex justify-start">
-              <div className="w-full max-w-[85%] space-y-2">
-                <ExecutionCard message={m} />
-
-                {m.error && (
-                  <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-                    {m.error}
-                  </div>
-                )}
-                {m.warning && (
-                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
-                    ⚠ {m.warning}
-                  </div>
-                )}
-
-                {m.content && (
-                  <div className={`rounded-2xl border border-slate-200 bg-white px-4 py-3 ${MARKDOWN_CLASS}`}>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
-                  </div>
-                )}
-
-                {m.streaming && !m.content && (
-                  <div className="flex items-center gap-2 text-xs text-slate-500">
-                    <span className="h-2 w-2 animate-pulse rounded-full bg-blue-500" />
-                    思考中…
-                  </div>
-                )}
-              </div>
-            </div>
-          )
+      <div className="flex items-center justify-between border-b border-slate-200 bg-white px-6 py-4">
+        <div>
+          <h1 className="text-lg font-semibold text-slate-900">Chat</h1>
+          <p className="text-sm text-slate-500">
+            发一个任务，Agent 会思考、调用工具，并把每一步实时推回来。
+          </p>
+        </div>
+        {streaming ? (
+          <Badge variant="outline" className="gap-1.5 text-blue-600">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />
+            运行中
+          </Badge>
+        ) : (
+          <Badge variant="secondary">空闲</Badge>
         )}
       </div>
 
-      <div className="border-t border-slate-200 bg-white p-4">
+      <div ref={transcriptRef} className="min-h-0 flex-1">
+        <ScrollArea className="h-full">
+          <div className="mx-auto max-w-3xl space-y-4 p-6">
+            {messages.length === 0 && (
+              <div className="mx-auto mt-16 max-w-xl text-center text-slate-500">
+                <Sparkles className="mx-auto mb-3 h-8 w-8 text-slate-400" />
+                <p className="mb-4 text-sm">
+                  输入一个任务，Agent 会思考、调用工具，并实时展示每一步执行过程。
+                </p>
+                <div className="flex flex-wrap justify-center gap-2">
+                  {EXAMPLES.map((ex) => (
+                    <Button
+                      key={ex}
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setInput(ex)}
+                      className="rounded-full text-xs text-slate-600"
+                    >
+                      {ex}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {messages.map((m, i) =>
+              m.role === "user" ? (
+                <div key={i} className="flex justify-end">
+                  <div className="max-w-[75%] whitespace-pre-wrap rounded-2xl bg-primary px-4 py-2 text-sm text-primary-foreground">
+                    {m.content}
+                  </div>
+                </div>
+              ) : (
+                <div key={i} className="flex justify-start">
+                  <div className="w-full max-w-[85%] space-y-2">
+                    <ExecutionCard message={m} />
+
+                    {m.error && (
+                      <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                        {m.error}
+                      </div>
+                    )}
+                    {m.warning && (
+                      <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                        ⚠ {m.warning}
+                      </div>
+                    )}
+
+                    {m.content && (
+                      <Card className={`gap-0 py-4 ${MARKDOWN_CLASS}`}>
+                        <CardContent className="px-4">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+                        </CardContent>
+                      </Card>
+                    )}
+
+                    {m.streaming && !m.content && (
+                      <div className="flex items-center gap-2 text-xs text-slate-500">
+                        <span className="h-2 w-2 animate-pulse rounded-full bg-blue-500" />
+                        思考中…
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )
+            )}
+          </div>
+        </ScrollArea>
+      </div>
+
+      <Separator />
+      <div className="bg-white p-4">
         <div className="mx-auto flex max-w-3xl items-end gap-2">
           <textarea
             value={input}
@@ -334,16 +372,11 @@ export default function ChatPage() {
               }
             }}
             placeholder="描述你的任务…（Enter 发送，Shift+Enter 换行）"
-            className="flex-1 resize-none rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+            className="flex-1 resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs transition-[color,box-shadow] outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
           />
-          <button
-            type="button"
-            onClick={send}
-            disabled={streaming || !input.trim()}
-            className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-slate-300"
-          >
+          <Button type="button" onClick={send} disabled={streaming || !input.trim()}>
             {streaming ? "执行中…" : "发送"}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

@@ -6,6 +6,27 @@ import type {
   BenchmarkReport,
   BenchmarkRunSummary,
 } from "../types";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { DASH, formatNumber, formatRatio, formatTokens } from "@/lib/format";
 
 type Kind = "pct" | "num" | "int";
 
@@ -30,66 +51,86 @@ const METRIC_ROWS: { label: string; key: keyof BenchmarkMetrics; kind: Kind }[] 
   { label: "已判分条数", key: "judged_tasks", kind: "int" },
 ];
 
-/** `null` 是"没测"（分母为 0），必须显示 `—` 而不是 0 —— 与 CLI 同一口径。 */
-function render(value: number | null | undefined, kind: Kind): string {
-  if (value === null || value === undefined) return "—";
-  if (kind === "pct") return `${(value * 100).toFixed(1)}%`;
-  if (kind === "int") return String(value);
-  return value.toFixed(1);
-}
+/** 一律走 `lib/format`：`null`/`undefined` 是"没测"（分母为 0），必须显示 `—` 而不是 0。 */
+const FORMAT: Record<Kind, (value: number | null | undefined) => string> = {
+  pct: formatRatio,
+  num: (value) => formatNumber(value, 1),
+  int: formatTokens,
+};
 
 function MetricsTable({ metrics }: { metrics: BenchmarkMetrics }) {
   const byStrategy = Object.entries(metrics.compression_by_strategy || {});
   return (
-    <table className="w-full text-sm">
-      <tbody>
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>指标</TableHead>
+          <TableHead className="text-right">数值</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
         {METRIC_ROWS.map(({ label, key, kind }) => (
-          <tr key={label} className="border-b border-slate-100 last:border-0">
-            <td className="py-1 text-slate-500">{label}</td>
-            <td className="py-1 text-right font-medium text-slate-800">
-              {render(metrics[key] as number | null, kind)}
-            </td>
-          </tr>
+          <TableRow key={label}>
+            <TableCell className="text-slate-500">{label}</TableCell>
+            <TableCell className="text-right font-medium text-slate-800">
+              {FORMAT[kind](metrics[key] as number | null | undefined)}
+            </TableCell>
+          </TableRow>
         ))}
         {byStrategy.map(([strategy, ratio]) => (
-          <tr key={strategy} className="border-b border-slate-100 last:border-0">
-            <td className="py-1 pl-4 text-slate-400">· {strategy}</td>
-            <td className="py-1 text-right text-slate-600">{render(ratio, "pct")}</td>
-          </tr>
+          <TableRow key={strategy}>
+            <TableCell className="pl-4 text-slate-400">· {strategy}</TableCell>
+            <TableCell className="text-right text-slate-600">{formatRatio(ratio)}</TableCell>
+          </TableRow>
         ))}
-      </tbody>
-    </table>
+      </TableBody>
+    </Table>
   );
 }
 
-function VerdictList({ report }: { report: BenchmarkReport }) {
+function VerdictTable({ report }: { report: BenchmarkReport }) {
   return (
-    <ul className="max-h-72 overflow-auto text-sm">
-      {report.verdicts.map((v) => {
-        const notes: string[] = [];
-        if (v.missing_tools.length) notes.push(`缺工具 ${v.missing_tools.join(",")}`);
-        if (v.missing_keywords.length) notes.push(`缺关键词 ${v.missing_keywords.join(",")}`);
-        if (v.warning) notes.push(v.warning);
-        if (v.error) notes.push(v.error);
-        if (v.judge_reason) notes.push(v.judge_reason);
-        return (
-          <li key={v.task_id} className="border-b border-slate-100 py-1 last:border-0">
-            <span className={v.success ? "text-emerald-600" : "text-rose-600"}>
-              {v.success ? "✓" : "✗"}
-            </span>{" "}
-            <span className="font-mono text-xs text-slate-700">{v.task_id}</span>
-            <span className="ml-2 text-xs text-slate-400">
-              步数 {v.steps} · 轮次 {v.rounds ? `${v.rounds}${v.max_steps ? `/${v.max_steps}` : ""}` : "—"}{" "}
-              · token {v.total_tokens}
-              {v.skipped ? " · ↻ 续跑复用" : ""}
-            </span>
-            {notes.length > 0 && (
-              <div className="pl-4 text-xs text-slate-500">{notes.join("；")}</div>
-            )}
-          </li>
-        );
-      })}
-    </ul>
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>任务</TableHead>
+          <TableHead>结果</TableHead>
+          <TableHead>步数</TableHead>
+          <TableHead>轮次</TableHead>
+          <TableHead>token</TableHead>
+          <TableHead>备注</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {report.verdicts.map((v) => {
+          const notes: string[] = [];
+          if (v.missing_tools.length) notes.push(`缺工具 ${v.missing_tools.join(",")}`);
+          if (v.missing_keywords.length) notes.push(`缺关键词 ${v.missing_keywords.join(",")}`);
+          if (v.warning) notes.push(v.warning);
+          if (v.error) notes.push(v.error);
+          if (v.judge_reason) notes.push(v.judge_reason);
+          if (v.skipped) notes.push("↻ 续跑复用");
+          return (
+            <TableRow key={v.task_id}>
+              <TableCell className="font-mono text-xs text-slate-700">{v.task_id}</TableCell>
+              <TableCell>
+                <Badge variant={v.success ? "secondary" : "destructive"}>
+                  {v.success ? "✓ 通过" : "✗ 失败"}
+                </Badge>
+              </TableCell>
+              <TableCell className="text-slate-600">{v.steps}</TableCell>
+              <TableCell className="text-slate-600">
+                {v.rounds ? `${v.rounds}${v.max_steps ? `/${v.max_steps}` : ""}` : DASH}
+              </TableCell>
+              <TableCell className="text-slate-600">{formatTokens(v.total_tokens)}</TableCell>
+              <TableCell className="max-w-md text-xs whitespace-normal text-slate-500">
+                {notes.join("；")}
+              </TableCell>
+            </TableRow>
+          );
+        })}
+      </TableBody>
+    </Table>
   );
 }
 
@@ -151,90 +192,135 @@ export default function BenchmarkPage() {
   }, [refresh]);
 
   return (
-    <div className="h-full overflow-auto p-6">
-      <div className="mb-4 flex items-center gap-3">
-        <h1 className="text-lg font-semibold text-slate-800">Benchmark</h1>
-        <button
-          type="button"
-          onClick={() => void refresh()}
-          className="flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-100"
-        >
-          <RefreshCw size={12} /> 刷新
-        </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => void startMockRun()}
-          className="flex items-center gap-1 rounded bg-slate-800 px-2 py-1 text-xs text-white hover:bg-slate-700 disabled:opacity-50"
-        >
-          <Play size={12} /> {busy ? "运行中…" : "跑一次（mock，离线）"}
-        </button>
+    <div className="flex h-full flex-col">
+      <div className="flex items-center justify-between border-b border-slate-200 bg-white px-6 py-4">
+        <div>
+          <h1 className="text-lg font-semibold text-slate-900">Benchmark</h1>
+          <p className="text-sm text-slate-500">
+            历史运行与指标报告。mock provider 是离线夹具，不是真实成绩。
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          {runs.length ? <Badge variant="outline">{runs.length} 份报告</Badge> : null}
+          <Button variant="outline" size="sm" onClick={() => void refresh()}>
+            <RefreshCw className="h-4 w-4" />
+            刷新
+          </Button>
+          <Button size="sm" disabled={busy} onClick={() => void startMockRun()}>
+            <Play className="h-4 w-4" />
+            {busy ? "运行中…" : "跑一次（mock，离线）"}
+          </Button>
+        </div>
       </div>
 
       {error && (
-        <div className="mb-3 rounded border border-rose-200 bg-rose-50 p-2 text-xs text-rose-700">
+        <div className="border-b border-rose-200 bg-rose-50 px-6 py-2 text-sm text-rose-700">
           {error}
         </div>
       )}
 
-      <div className="flex gap-6">
-        <div className="w-64 shrink-0">
-          <div className="mb-2 text-xs font-medium text-slate-500">历史运行</div>
-          {runs.length === 0 && <div className="text-xs text-slate-400">还没有报告</div>}
-          <ul className="space-y-1">
-            {runs.map((run) => (
-              <li key={run.run_id}>
-                <button
-                  type="button"
-                  onClick={() => void open(run.run_id)}
-                  className={`w-full rounded px-2 py-1 text-left text-xs ${
-                    selected?.run_id === run.run_id
-                      ? "bg-slate-800 text-white"
-                      : "text-slate-600 hover:bg-slate-100"
-                  }`}
-                >
-                  <div className="font-mono">{run.run_id}</div>
-                  <div className="opacity-70">
-                    {run.config?.group ?? "—"} · {run.config?.provider ?? "?"} ·{" "}
-                    {run.metrics.tasks_total} 条 · 成功率{" "}
-                    {render(run.metrics.success_rate, "pct")}
-                  </div>
-                </button>
-              </li>
-            ))}
-          </ul>
+      <div className="grid min-h-0 flex-1 grid-cols-[300px_1fr]">
+        <div className="flex min-h-0 flex-col border-r border-slate-200 bg-white">
+          <div className="flex items-center justify-between px-3 py-2">
+            <span className="text-xs font-medium text-slate-500">历史运行</span>
+            <span className="text-xs text-slate-400">{runs.length}</span>
+          </div>
+          <Separator />
+          <ScrollArea className="min-h-0 flex-1">
+            {runs.length === 0 ? (
+              <div className="p-4 text-sm text-slate-500">还没有报告。点右上角跑一次。</div>
+            ) : (
+              <div className="flex flex-col p-2">
+                {runs.map((run) => (
+                  <button
+                    key={run.run_id}
+                    type="button"
+                    onClick={() => void open(run.run_id)}
+                    className={`mb-1 rounded-md p-2 text-left transition ${
+                      selected?.run_id === run.run_id
+                        ? "bg-slate-100 ring-1 ring-slate-300"
+                        : "hover:bg-slate-50"
+                    }`}
+                  >
+                    <div className="font-mono text-xs text-slate-700">{run.run_id}</div>
+                    <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-slate-500">
+                      <Badge variant="outline">{run.config?.group ?? DASH}</Badge>
+                      <Badge variant="secondary">{run.config?.provider ?? "?"}</Badge>
+                      <span>{formatTokens(run.metrics.tasks_total)} 条</span>
+                      <span>成功率 {formatRatio(run.metrics.success_rate)}</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </ScrollArea>
         </div>
 
-        <div className="flex-1">
-          {!selected && <div className="text-sm text-slate-400">选一份报告查看指标与明细</div>}
-          {selected && (
-            <div className="space-y-4">
-              <div className="text-xs text-slate-500">
-                <span className="font-mono">{selected.run_id}</span> · provider{" "}
-                <span className="font-medium">{selected.config?.provider ?? "?"}</span> · 模型{" "}
-                {selected.config?.model ?? "?"} · 分组 {selected.config?.group ?? "—"} ·{" "}
-                {selected.created_at}
+        <ScrollArea className="min-h-0">
+          {!selected ? (
+            <div className="p-6 text-sm text-slate-500">选一份报告查看指标与明细。</div>
+          ) : (
+            <div className="space-y-4 p-6">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex flex-wrap items-center gap-2 font-mono text-base">
+                    {selected.run_id}
+                    <Badge variant="secondary">{selected.config?.provider ?? "?"}</Badge>
+                    <Badge variant="outline">{selected.config?.group ?? DASH}</Badge>
+                  </CardTitle>
+                  <CardDescription className="flex flex-wrap gap-3">
+                    <span>模型 {selected.config?.model ?? "?"}</span>
+                    <span>分组 {selected.config?.group ?? DASH}</span>
+                    <span>{selected.created_at}</span>
+                  </CardDescription>
+                </CardHeader>
                 {(selected.config?.synthetic === true ||
                   selected.config?.provider === "mock") && (
-                  <div className="mt-1 rounded bg-amber-50 p-1 text-amber-700">
-                    mock 是离线夹具（合成事件、按任务声明直接调用工具），不是真实成绩
-                    {selected.config?.synthetic !== true && "（旧报告没有 synthetic 标记）"}
-                  </div>
+                  <CardContent>
+                    <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+                      mock 是离线夹具（合成事件、按任务声明直接调用工具），不是真实成绩
+                      {selected.config?.synthetic !== true && "（旧报告没有 synthetic 标记）"}
+                    </div>
+                  </CardContent>
                 )}
-              </div>
-              <div className="rounded border border-slate-200 bg-white p-3">
-                <div className="mb-2 text-xs font-medium text-slate-500">指标</div>
-                <MetricsTable metrics={selected.metrics} />
-              </div>
-              <div className="rounded border border-slate-200 bg-white p-3">
-                <div className="mb-2 text-xs font-medium text-slate-500">
-                  逐任务明细（{selected.verdicts.length}）
-                </div>
-                <VerdictList report={selected} />
-              </div>
+              </Card>
+
+              <Tabs defaultValue="overview">
+                <TabsList>
+                  <TabsTrigger value="overview">概览</TabsTrigger>
+                  <TabsTrigger value="verdicts">
+                    逐条明细（{selected.verdicts.length}）
+                  </TabsTrigger>
+                </TabsList>
+                <Separator className="my-4" />
+                <TabsContent value="overview">
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="text-base">指标</CardTitle>
+                      <CardDescription>
+                        没测到的指标显示 {DASH}（分母为 0），不是 0。
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <MetricsTable metrics={selected.metrics} />
+                    </CardContent>
+                  </Card>
+                </TabsContent>
+                <TabsContent value="verdicts">
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="text-base">逐任务明细</CardTitle>
+                      <CardDescription>共 {selected.verdicts.length} 条。</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <VerdictTable report={selected} />
+                    </CardContent>
+                  </Card>
+                </TabsContent>
+              </Tabs>
             </div>
           )}
-        </div>
+        </ScrollArea>
       </div>
     </div>
   );
