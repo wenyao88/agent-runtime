@@ -11,15 +11,24 @@ ReAct → Function Calling → Tool Registry → MCP → Skills
 
 ## 架构
 
-| 层 | 目录 | 职责 |
-|----|------|------|
-| React Web UI | `web/` | Chat / Trace / Inspector 页面 |
-| FastAPI | `src/agent_runtime/api/` | REST + WebSocket，依赖注入 |
-| Core | `src/agent_runtime/core/` | 纯接口 + 纯逻辑，零 infrastructure 依赖 |
-| Infrastructure | `src/agent_runtime/infrastructure/` | LLM Provider / MCP / DB / 原生工具 |
+```
+scripts/           入口：run_demo_mock / run_demo1_github / run_benchmark / inspect_run / mcp_server
+   │  （唯一允许 import api 的地方）
+api/               FastAPI 适配层：routes / ws / schemas / deps / app —— 只做参数解析、状态码与序列化
+   │
+infrastructure/    实现层：llm / tools / mcp / skills / memory(Redis·PG) / context / benchmark / trace
+   │              第三方库一律惰性 import；不 import api
+core/              协议与纯逻辑：agent(ReAct) / llm / tool / skill / memory / context / trace / benchmark / mcp
+                  零第三方依赖、不 import 上面两层 —— 所以它能在没有网络、没有数据库的环境里被完整测试
+web/               React 19 + Vite + Tailwind v4 + shadcn/ui：Chat / Trace / Inspector / Benchmark
+```
 
-分层规则：`core/` 只依赖标准库（协议 + 纯逻辑，可脱离第三方包测试）；`infrastructure/` 放实现，第三方库
-**惰性 import**；`api/` 只做薄适配。任何可选能力（MCP / 记忆层 / 技能）缺失或损坏都**只记录错误，不阻断启动与任务**。
+分层规则由测试守着（`tests/unit/test_core_layering.py`，递归扫 `core/**` 与 `infrastructure/**` 的 import，
+白名单判定）。唯一的例外是 `core/context/manager.py` 对 `tiktoken` 的**可选** import：装了就用真分词器，
+没装退化为字符估算（`len // 4`），并显式列入白名单。
+
+任何可选能力（MCP / 记忆层 / 技能 / trace 存储）缺失或损坏都**只记录错误、不阻断启动与任务**。
+为什么这么分层、以及每条设计取舍否掉了什么方案：见 [docs/architecture.md](docs/architecture.md)。
 
 ## 本地跑起来
 
@@ -121,15 +130,16 @@ python tests/unit/test_memory_manager.py
 * **Inspector 页**：四个 Tab —— **上下文**（分段 token 条 + 压缩阈值线 + 最近一次压缩的省/丢/摘要成本）、
   **记忆**（三层开关与最近条目）、**工具**（目录 + 参数 schema 展开）、**技能**（触发词与依赖工具）。
 
-口径与天花板：
+口径与使用限制：
 
 * `source` 区分 `chat` / `benchmark` / `demo` —— **评测轨迹不会混进聊天列表**（前端按来源过滤才有意义）；
 * `/api/context` 反映**最近一次聊天会话**的上下文。拿不到时 `available: false` + 可读原因，HTTP 仍 **200**
   （前端直接展示原因，不用 500 装死）；并发多会话时看到的是最后那一次；评测 agent 的上下文不进这里；
 * trace **默认内存环形**（默认 50 条，满了淘汰最旧，重启即丢）；要跨重启就把 `TRACE_STORE=sqlite`
-  （`TRACE_DB_PATH` 默认 `trace.db`）—— 单进程、无并发写保证。**坏存储不阻断启动**：路径不可用 → 直接换成内存
-  store；文件能打开但不是数据库（垃圾文件）→ 仍用 SQLite 但读写降级为空。两条路都把原因记进
-  `errors` 并显示在 Trace 页顶部（"可用但读空"和"根本没落盘"不是一回事，所以分得开）；
+  （`TRACE_DB_PATH` 默认 `trace.db`）—— 单进程、无并发写保证。**坏存储不阻断启动**，两条路最终都用内存 store、
+  只有 `errors` 里的原因不同：路径不可用 → 直接换成内存；文件能打开但不是数据库（垃圾文件）→
+  `SqliteTraceStore` 自身退化为可用但读空，装配层见到 `errors` 后同样换成内存。
+  原因会显示在 Trace 页顶部（"可用但读空"和"根本没落盘"分得开）；
 * 前端**进页面时拉一次**，不做实时推送；trace 的 PG 三表未建（协议已留好，接上即可）；
 * **"没测到"和"真的是 0"**：`TokenUsage` 这个类型全仓用 0 表示"provider 没报 usage"，
   前端不区分（页面照实显示 0）—— 这是既有口径，不是本页的取舍；
@@ -149,8 +159,10 @@ python tests/unit/test_memory_manager.py
 | `web_scrape` | 抓取网页并提取正文（去脚本/样式） | — |
 | `pdf_read` | 读取工作区内 PDF 文本，支持页范围 `1-5` | 需 `pypdf` |
 
-工具契约（含 MCP 工具）：`execute()` **永不抛异常**，失败一律返回 `ToolResult(success=False, text="Error: …")`
-作为 observation，由模型自行纠正。
+工具契约（含 MCP 工具）：失败一律返回可读的 `ToolResult(success=False, text="Error: …")` 作为 observation，
+由模型自行纠正 —— **框架保证异常一定会被转成失败结果**（`ReActLoop` 执行工具处与 MCP server 都统一兜底），
+但单个工具的 `execute()` 自身在参数类型错误时仍可能抛 `TypeError`（例如 `read_file(path=123)`），
+所以新工具不要依赖"永远不会有异常"。
 
 ## MCP：消费外部 MCP Server
 
@@ -195,7 +207,7 @@ python scripts/mcp_server.py --root D:/work/repo --name my-tools
   "args": ["D:/deepseek_harness/first/scripts/mcp_server.py", "--root", "D:/deepseek_harness/first"] } } }
 ```
 
-天花板：只有 **stdio + tools**（没有 HTTP/SSE、没有 resources/prompts/sampling）；协议版本
+使用限制：只有 **stdio + tools**（没有 HTTP/SSE、没有 resources/prompts/sampling）；协议版本
 `2024-11-05`；**没有鉴权**，只在本机 / 受信环境跑；`read_file` / `pdf_read` 用 `--root` 限制在给定目录内。
 
 自研实现的正确性有两层证据：
@@ -208,7 +220,7 @@ python scripts/mcp_server.py --root D:/work/repo --name my-tools
 
 **未验证**：Claude Desktop 真机接入（要装那个客户端，也只能在图形界面里点）。
 
-天花板（写下来免得被当成"没实现"）：**合法 JSON 但不是对象**（`[1,2]` / `"x"` / `42`）的行不产生响应
+使用限制（写下来免得被当成"没实现"）：**合法 JSON 但不是对象**（`[1,2]` / `"x"` / `42`）的行不产生响应
 （JSON-RPC 严格说该回 `-32600`）—— MCP 不用 batch，客户端不会因此永久等待；这条已由测试钉成**有意行为**。
 
 ## Skills：领域 SOP（Markdown 定义）
@@ -239,13 +251,13 @@ tags: [code]
 **无命中就不注入**。技能文本只能**追加**在硬规则之后 —— 技能是"内容"，防幻觉规则是"底线"。
 可用 `AgentResult.skills_used`、`skill_matched` 事件、`GET /api/skills` 看到本次用了哪个技能。
 
-## Memory：三层记忆（默认全关）
+## Memory：三层记忆（持久层默认全关）
 
-| 层 | 存储 | 范围 | 检索方式 |
-|---|---|---|---|
-| Working | 进程内 | 进程生命周期 | 子串匹配 |
-| Short-term | Redis List + TTL | 单会话（`session_id`） | 最近 N 条 + 子串过滤 |
-| Long-term | PostgreSQL + pgvector | 跨会话 | 带 `query` → 余弦距离语义检索；不带 `query` → 按时间倒序取最近 N 条 |
+| 层 | 存储 | 范围 | 检索方式 | 开关 |
+|---|---|---|---|---|
+| Working | 进程内 | 进程生命周期 | 子串匹配 | **无常开开关**（始终构造） |
+| Short-term | Redis List + TTL | 单会话（`session_id`） | 最近 N 条 + 子串过滤 | `MEMORY_SHORT_TERM_ENABLED` |
+| Long-term | PostgreSQL + pgvector | 跨会话 | 带 `query` → 余弦距离语义检索；不带 `query` → 按时间倒序取最近 N 条 | `MEMORY_LONG_TERM_ENABLED` |
 
 召回顺序 `working → short_term → long_term`，够 `MEMORY_RECALL_TOP_K` 条即**短路**（不查更慢的持久层）。
 注入时带**来源与日期**标注、截断带省略号，上限 `MEMORY_INJECT_MAX_CHARS`（默认 500）：
@@ -256,7 +268,7 @@ Relevant Memories:
 - [short_term] 本会话前面确认过 Qdrant 的许可协议…
 ```
 
-开启步骤（默认全关：没起 DB/Redis 也不影响启动与任务）：
+开启步骤（**可关的是两个持久层**：没起 DB/Redis 也不影响启动与任务；工作记忆始终在进程内）：
 
 ```bash
 # .env 里打开需要的层
@@ -272,7 +284,10 @@ alembic upgrade head
 
 ## 上下文压缩（超预算自动触发）
 
-每次工具结果之后检查上下文占用（触发阈值 = `AGENT_CONTEXT_COMPACTION_THRESHOLD` × 可用预算），按顺序**逐级**处理：
+**一轮里整批工具结果都进入上下文之后**检查一次占用（不是每个工具结果之后各查一次 —— 同一轮的多个并行调用
+属于同一批），按顺序**逐级**处理。触发阈值 = `AGENT_CONTEXT_COMPACTION_THRESHOLD` × **可用预算**，
+而可用预算本身是算出来的：`可用 = (LLM_MAX_TOKENS − 4096 保留输出) × 0.9 安全余量`
+（默认 128000 → 可用 111513，阈值 0.8 → 89210）：
 
 | 顺序 | 策略 | 做什么 | 代价 |
 |---|---|---|---|
@@ -284,7 +299,8 @@ alembic upgrade head
 自动模式下**永不**直接丢消息：占用 ≥ 95% 就直接摘要，否则一律先 SQUEEZE、再摘要、最后才 TRUNCATE。
 
 ```bash
-# .env：SUMMARIZE 默认关（需要 JUDGE_LLM_API_KEY；关闭时超预算直接丢弃最旧消息）
+# .env：SUMMARIZE 默认关（需要 JUDGE_LLM_API_KEY，缺省回退 LLM_API_KEY；
+# 关闭时超预算会先 SQUEEZE，压不下去才丢弃最旧消息）
 AGENT_COMPACTION_SUMMARIZE_ENABLED=false
 AGENT_CONTEXT_COMPACTION_THRESHOLD=0.8
 ```
@@ -293,12 +309,12 @@ AGENT_CONTEXT_COMPACTION_THRESHOLD=0.8
 （超出带标记截断）。摘要器缺省、调用失败、返回空或返回非字符串都会**如实降级为 TRUNCATE**，并在 `compaction`
 事件里带上 `degraded_from` 与原因；什么也没改变的压缩会带 `noop: true`（不伪装成一次成功的压缩）。
 
-天花板：
+使用限制：
 
 - 摘要那次 LLM 调用的 token / 时延会随 `compaction` 事件上报并汇总进报告（见下节"摘要 token / 摘要耗时"）；
   但**只有 provider 报了 `usage` 才有 token**，没报时记 0（不估算）。单次 LLM 摘要**不保证无损**；多轮压缩会逐层叠加摘要。
-- **消息太少时没有可摘要的素材**：只保留 `system + 当前任务 + 最近 6 条`，所以不足 7 条时 SUMMARIZE 无事可做 ——
-  短任务只会用到 SQUEEZE / TRUNCATE。
+- **消息太少时没有可摘要的素材**：保留段是 `system + 当前任务 + 最近 6 条` 共 8 条，所以总消息数 ≤ 8 时
+  `old` 为空、SUMMARIZE 无事可做（实测 8 条仍 no-op，第 9 条才会摘要 1 条）—— 短任务只会用到 SQUEEZE / TRUNCATE。
 - **保留窗口本身超预算时压不下去**：此时每次检查都报 `noop`，上下文会持续高于阈值
   （不丢当前任务与最近消息是硬约束）。
 
@@ -334,7 +350,7 @@ python scripts/inspect_run.py --json                       # 机器可读
 也可走 API（`GET /api/benchmarks`、`GET /api/benchmarks/{run_id}`、`POST /api/benchmarks/run`），前端 **Benchmark** 页
 可看历史运行与逐任务明细。
 
-### 8 个指标与口径
+### 8 个核心指标与口径（表体含计数类共 10 项）
 
 | 指标 | 口径 |
 |---|---|
@@ -353,7 +369,7 @@ python scripts/inspect_run.py --json                       # 机器可读
 每份报告自带 `provider` / 模型 / 条数 / 时间戳；**`mock` 报告还带 `config.synthetic: true`** —— 离线夹具
 （合成压缩事件、按任务声明直接调用工具）**不是真实成绩**，CLI、JSON 与前端都会明确标出。
 
-天花板：每步 token 未统计（一次响应可含多个工具调用，归属口径不明确）；串行执行（100+ 条时再加并发）；
+使用限制：每步 token 未统计（一次响应可含多个工具调用，归属口径不明确）；串行执行（100+ 条时再加并发）；
 报告存 JSON 文件、未入库；**压缩比可以为负**（那说明 `after > before`，即上下文变大，属于真实数据不加修饰）；
 `list_runs` 按 ISO 字符串排序（写入带时区偏移的时间戳时会失真）；真实 100 条成绩与裁判评分只能在你的机器上跑出来；
 **前端 Benchmark 页只触发 mock 自检**（没有 provider / limit / judge 控件，加它们属于新能力，本阶段只统一了风格）——
@@ -388,16 +404,19 @@ python scripts/run_benchmark.py --provider mock --ablation --limit 3   # 离线�
    同一版本代码**；对比报告 `kind: "ablation"`，与组报告同目录但不出现在历史列表里。
 5. 相对差 = 绝对差 / baseline；baseline 为 0 或指标为"没测"（`—`）时相对差算不出来，同样显示 `—`。
 
-天花板：不做统计显著性检验（100 级样本只给均值与计数）；不做并发；judge 单次采样，噪声未消除；
+使用限制：不做统计显著性检验（100 级样本只给均值与计数）；不做并发；judge 单次采样，噪声未消除；
 对比报告只按 `pair_role` 切分**逐任务判分**（成功率/步数/token），压缩与摘要成本只能看整组合计 ——
 事件流不进单组报告，所以没法按角色拆分。
 
-**真实成绩位留空**：三组真实数据的报告还没跑（沙箱里没有 LLM 凭据，且这是要花钱的调用）。
-这里**不放占位数、不写示例数字** —— 跑完下面这条再贴真实报告：
+**真实成绩不进仓库**：报告是**本地产物**（写在 `benchmark_runs/`，已 gitignore），仓库里不贴数字。
+要复现就自己跑（消融三组约 60 次真实调用）：
 
 ```bash
 python scripts/run_benchmark.py --provider real --ablation --limit 20   # 20 条 × 3 组
 ```
+
+跑完用 `python scripts/inspect_run.py` 看逐任务失败原因与轮次；
+报告字段的口径见上一节，`—` 一律表示"没测到"，不要读成 0。
 
 ### 断点续跑：几小时的评测断了不用从头来
 
@@ -419,7 +438,7 @@ python scripts/run_benchmark.py --provider real --ablation --ablation-id 2026092
 - **来源可查**：从进度文件捡回来的判分带 `skipped: true`，报告 `config.resumed` 记录条数。
 - 进度文件不是报告：历史列表只扫 `*.json`，它不会变成一条幽灵记录。
 
-天花板：进度写入是**尽力而为但可见**的（目录只读/磁盘满时报告照样跑完，原因写进 `config.progress_error` 并打日志）；
+使用限制：进度写入是**尽力而为但可见**的（目录只读/磁盘满时报告照样跑完，原因写进 `config.progress_error` 并打日志）；
 进度记录只存"重算指标所需的最小集"（判分 + 工具事件 + 压缩事件），不存答案正文，
 所以续跑不能重放答案、也不能补跑裁判；任务集只按 **id 集合**判断是否变过，改了某条任务的文本不会被发现。
 
@@ -449,17 +468,27 @@ python scripts/run_demo1_github.py --repo fastapi/fastapi --session-id smoke-1
 ```
 src/agent_runtime/
   core/           协议与纯逻辑：agent(ReAct) / llm / tool / skill / memory / context / trace / benchmark / mcp
+                  （trace 的**内存环形** store 与 TraceStore 协议在这里）
   infrastructure/ 实现：llm / mcp(客户端 + 自研 server 的 stdio 循环) / db / memory(Redis·PG) / tools / skills /
-                  benchmark / trace(内存环形 + 可选 SQLite)
+                  benchmark / trace(可选 SQLite store + 装配 catalog + API 用的 service)
   api/            FastAPI：routes（chat / tools / skills / memories / benchmarks / traces / context）/ ws /
                   schemas / deps / app
   config/         settings（pydantic-settings）与日志
 skills/           内置技能（Markdown SOP）
 benchmarks/       评测任务集（tasks.json）
-benchmark_runs/   评测报告落盘（gitignore）
+benchmark_runs/   评测报告落盘（gitignore，属本地产物）
 alembic/          memory_entries 迁移（pgvector）
 scripts/          run_demo_mock.py（零依赖）/ run_demo1_github.py（真实链路）/ run_benchmark.py（评测）/
                   inspect_run.py（只读看报告）/ mcp_server.py（把工具暴露出去）
 tests/            unit/（无需 pytest 也能跑）+ integration/
 web/              React 19 + Vite + Tailwind v4 + shadcn/ui（Chat / Trace / Inspector / Benchmark）
 ```
+
+## 文档导航
+
+| 想知道 | 看 |
+|---|---|
+| 怎么跑起来、有哪些接口与配置项 | 本文件（上面各节） |
+| 系统怎么分层、一次请求经过什么、每个设计取舍否掉了什么方案 | [`docs/architecture.md`](docs/architecture.md) |
+| 端到端演示（GitHub 仓库分析）的用法与观察点 | [`docs/demo1_github.md`](docs/demo1_github.md) |
+| 工具契约、指标口径、使用限制 | 本文件的对应章节；`—` 一律表示"没测到" |

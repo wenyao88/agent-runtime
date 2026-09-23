@@ -13,7 +13,7 @@ ReAct Loop → Function Calling → Tool Registry → 4 个 GitHub 工具 → �
 | Tool Registry | 8 个原生工具统一注册，模型只看到 `name` + `description` + `parameters` |
 | 工具错误恢复 | 读不存在的文件、目录当成文件读、超限文件 → 都变成可读 observation，模型自行纠正 |
 | Context 压缩 | 长任务触发 SQUEEZE / TRUNCATE |
-| Trace | 每步记录 thought / tool_call / tool_result / compaction，带 trace_id |
+| Trace | 按步记录 thought / tool_call / tool_result，带 trace_id（`compaction` 是**会话级**事件，记在 step 0，不属于某一步） |
 
 ## 1. 前置条件
 
@@ -39,6 +39,7 @@ python scripts/run_demo1_github.py --repo fastapi/fastapi --session-id smoke-1
 
 ```
 任务：分析 GitHub 仓库 fastapi/fastapi，给出一份结构化报告：...
+会话：default
 
 ── Step 1 ──
 💭 先获取仓库的基本信息。
@@ -57,7 +58,8 @@ description: FastAPI framework, high performance...
    `github_read_file` 精读 —— 这正是 Tool Selection 能力的体现。
 2. **错误是如何被吸收的**：故意让它读一个不存在的文件（或用 `--focus` 引导），可以看到失败结果被写回
    上下文后模型改变策略，而不是整个任务崩掉。
-3. **token 与步数**：结尾会打印步数 / token / 耗时 / trace_id。
+3. **步数、轮次与 token**：结尾会打印**步数 / 轮次 / token / 耗时 / trace_id**。
+   两个数别混：步数 = 工具调用数 + 1，轮次 = 真实 LLM 调用次数（一轮里模型可以一次发多个工具调用）。
 4. **全工具失败时不可信**：如果所有工具调用都失败，收尾摘要会打印 `⚠` 告警（见根 README 的
    「输出可信度」）—— 此时报告内容没有真实工具结果支撑。
 
@@ -69,7 +71,7 @@ description: FastAPI framework, high performance...
 | 限制 | 说明 |
 |---|---|
 | `github_search_code` 需要 token | 未配置 token 时工具**不发起请求**，直接返回可读错误（该接口未鉴权必然 401） |
-| 只支持公开仓库 | 未实现鉴权私有仓库的完整流程 |
+| 配了 token 就是鉴权请求 | 填了 `GITHUB_TOKEN` 时会带 `Authorization` 头（未填则走公开只读接口，限流更严）；**私有仓库的完整流程未验证** |
 | 远程 PDF 不支持 | `pdf_read` 目前只读工作区内的本地文件 |
 | 非 UTF-8 文本 | 读取时按 UTF-8 解码，无法解码的字节以替换字符呈现，不报错 |
 
@@ -94,7 +96,8 @@ Demo 1 的任务结束会把 `task/answer` 摘要写入已启用的记忆层。�
 python scripts/run_demo1_github.py --repo fastapi/fastapi --session-id smoke-1   # 跑两次
 curl "http://127.0.0.1:8000/api/memories?layer=short_term&session_id=smoke-1"    # 应看到 source=short_term
 curl "http://127.0.0.1:8000/api/memories?layer=long_term"                        # 不带 query：按时间取最近
-curl -X DELETE "http://127.0.0.1:8000/api/memories?session_id=smoke-1"           # 只清该会话
+curl -X DELETE "http://127.0.0.1:8000/api/memories?session_id=smoke-1"           # 清该会话的短时记忆；
+                                                                                 # 长期记忆是**全表清空**（PG 层不接受 session_id）
 ```
 
 装配失败（例如开了长期记忆却没配 `EMBEDDING_API_KEY`）会打印 `⚠ 记忆层问题：…`，不会静默降级。
