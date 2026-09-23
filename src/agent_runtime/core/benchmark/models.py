@@ -76,6 +76,8 @@ class TaskVerdict:
     warning: str | None = None
     skills_used: list[str] = field(default_factory=list)
     steps: int = 0
+    min_steps: int = 0
+    """任务声明的期望步数。**只记录不判分**（口径见 spec §5）。"""
     total_tokens: int = 0
     latency_ms: int = 0
     error: str = ""
