@@ -17,6 +17,11 @@ from typing import Any
 
 from ...core.memory.manager import MemoryManager
 
+MEMORY_CONSOLIDATE_PROMPT = (
+    "把下面这段任务记录压缩成一条可复用的长期记忆（保留结论与关键事实，去掉过程细节），"
+    "只输出压缩后的内容，不要任何前后缀：\n\n{text}"
+)
+
 
 def build_memory_manager(settings: Any) -> tuple[MemoryManager, list[str]]:
     """按 settings 装配三层记忆，返回 `(manager, 错误列表)`。
@@ -78,32 +83,16 @@ def build_memory_manager(settings: Any) -> tuple[MemoryManager, list[str]]:
     return MemoryManager(short_term=short_term, long_term=long_term, summarizer=summarizer), errors
 
 
-def build_summarizer(settings: Any):
+def build_summarizer(settings: Any, *, provider_factory: Any = None):
     """任务结束时的整理用 **JUDGE_LLM**（spec D5）：省主模型上下文、可独立换模型。
 
     没有可用的 key 就返回 None —— 此时 `MemoryManager.consolidate` 会退化为"存原文截断"，
-    宁可存粗糙原文也不丢记忆。**惰性 import**：默认关时不该因为缺 openai 而影响装配。
+    宁可存粗糙原文也不丢记忆。
+
+    provider 解析与调用 plumbing 自 Phase 5 起与**上下文压缩**共用（`llm/summarizer.py`）：
+    两处只有 prompt 不同，解析逻辑只留一份（否则就会像 Phase 4 的装配那样慢慢漂移）。
+    `provider_factory` 仅供测试注入。
     """
-    api_key = settings.judge_llm_api_key or settings.llm_api_key
-    if not api_key:
-        return None
+    from ..llm.summarizer import build_summarizer as _shared
 
-    from ...core.llm.types import Message
-    from ..llm.openai_compatible import OpenAICompatibleProvider
-
-    provider = OpenAICompatibleProvider(
-        api_key=api_key,
-        base_url=settings.judge_llm_base_url or settings.llm_base_url,
-        model=settings.judge_llm_model,
-        temperature=0.0,
-    )
-    prompt = (
-        "把下面这段任务记录压缩成一条可复用的长期记忆（保留结论与关键事实，去掉过程细节），"
-        "只输出压缩后的内容，不要任何前后缀：\n\n{text}"
-    )
-
-    async def summarize(text: str) -> str:
-        resp = await provider.chat([Message(role="user", content=prompt.format(text=text))])
-        return (resp.content or "").strip()
-
-    return summarize
+    return _shared(settings, MEMORY_CONSOLIDATE_PROMPT, provider_factory=provider_factory)
