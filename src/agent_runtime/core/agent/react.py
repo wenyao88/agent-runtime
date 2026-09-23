@@ -205,21 +205,24 @@ class ReActLoop:
                 steps.append(AgentStep(step_number=n, thought=thought,
                                        action=ToolCall(tool_name=tc.name, arguments=args or {}),
                                        observation=obs_text[:2000]))
-                if self.ctx.should_compact():
-                    cr = await self.ctx.compact()
-                    if self.tracer:
-                        self.tracer.record_compaction(cr.tokens_before, cr.tokens_after,
-                                                      cr.strategy.value)
-                    yield AgentEvent(AgentEventType.COMPACTION, {
-                        "before": cr.tokens_before, "after": cr.tokens_after,
-                        "strategy": cr.strategy.value,
-                        # 降级原因与摘要条数必须发出去：只写进 CompactionResult 的话，
-                        # CLI / WS / 前端完全看不到"想摘要却没做成"（展示层藏机制是老坑）。
-                        "degraded_from": (
-                            cr.degraded_from.value if cr.degraded_from else None
-                        ),
-                        "reason": cr.degraded_reason,
-                        "summarized": cr.summarized_messages})
+            # 压缩必须发生在**整批 tool 结果都入 context 之后**：压缩可能丢弃带 `tool_calls`
+            # 的 assistant 消息，若还在逐个追加 tool 结果，后面追加的那些就变成孤儿 tool 消息
+            # （协议要求 tool 紧跟 tool_calls），下一次 llm.chat() 会被端点直接拒绝。
+            if self.ctx.should_compact():
+                cr = await self.ctx.compact()
+                if self.tracer:
+                    self.tracer.record_compaction(cr.tokens_before, cr.tokens_after,
+                                                  cr.strategy.value)
+                yield AgentEvent(AgentEventType.COMPACTION, {
+                    "before": cr.tokens_before, "after": cr.tokens_after,
+                    "strategy": cr.strategy.value,
+                    # 降级原因与摘要条数必须发出去：只写进 CompactionResult 的话，
+                    # CLI / WS / 前端完全看不到"想摘要却没做成"（展示层藏机制是老坑）。
+                    "degraded_from": (
+                        cr.degraded_from.value if cr.degraded_from else None
+                    ),
+                    "reason": cr.degraded_reason,
+                    "summarized": cr.summarized_messages})
 
         warnings: list[str] = []
         if tool_calls_total and tool_calls_failed == tool_calls_total:

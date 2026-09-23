@@ -575,13 +575,29 @@ async def test_recall_top_k_defaults_to_three() -> None:
 # 调用方（CLI / WS / 前端）就完全看不到 —— "机制做了、展示层藏起来"在本项目已发生三次。
 
 
-def _tiny_ctx(summarizer=None) -> ContextManager:
+def _tiny_ctx(summarizer=None, keep_recent: int = 1) -> ContextManager:
     """预算小到必然触发压缩：available=1 → 阈值 0，每个工具结果之后都会压一次。"""
     return ContextManager(
         budget=TokenBudget(model_max_tokens=1, reserved_output=0, safety_margin=1.0),
-        keep_recent=1,
+        keep_recent=keep_recent,
         summarizer=summarizer,
     )
+
+
+def _orphan_tool_ids(messages) -> list[str]:
+    """协议约束：每条 `tool` 消息都必须被**前面某条** assistant 的 tool_calls 覆盖。
+
+    只检查保留段开头是不够的（原有测试就只看了 `messages[2]`）—— 孤儿会出现在**尾部**。
+    """
+    seen: set[str] = set()
+    orphans: list[str] = []
+    for m in messages:
+        if m.role == "assistant":
+            for tc in m.tool_calls or []:
+                seen.add(tc.id)
+        elif m.role == "tool" and m.tool_call_id not in seen:
+            orphans.append(m.tool_call_id or "?")
+    return orphans
 
 
 async def test_compaction_event_reports_a_degraded_summary() -> None:
@@ -625,6 +641,36 @@ async def test_compaction_event_reports_a_successful_summary() -> None:
     assert data["degraded_from"] is None
     assert data["reason"] == ""
     assert data["summarized"] >= 1
+
+
+async def test_compaction_never_orphans_a_tool_result_from_the_same_batch() -> None:
+    """回归（审查 C1）：压缩若发生在 tool 循环**内部**，同一批的后续 tool 结果会变成孤儿。
+
+    一个 assistant 带 7 个 tool_calls + 生产默认 `keep_recent=6` + 超预算：
+    压缩会把那条 assistant 丢掉，而循环还会继续追加后面的 tool 结果 →
+    最终上下文成了 `[system, user, tool]`，OpenAI 兼容端点会直接拒绝
+    （"tool message must follow a tool_calls message"），下一步 `llm.chat()` 就炸。
+    """
+    calls = [
+        FunctionCall(id=f"c{i}", name="read_file", arguments='{"path": "a.txt"}')
+        for i in range(1, 8)
+    ]
+    agent, ctx, memory, tracer, root = _setup(
+        [
+            LLMResponse(content=None, tool_calls=calls, token_usage=TokenUsage()),
+            LLMResponse(content="最终答案"),
+        ],
+        context_manager=_tiny_ctx(keep_recent=6),
+    )
+    try:
+        await agent.run("读 7 次")
+        messages = ctx.get_messages()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    assert _orphan_tool_ids(messages) == [], [m.role for m in messages]
+    assert messages[0].role == "system"
+    assert messages[-1].role != "tool", [m.role for m in messages]
 
 
 if __name__ == "__main__":
