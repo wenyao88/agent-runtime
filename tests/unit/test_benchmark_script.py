@@ -31,6 +31,8 @@ def _new_dir() -> Path:
     global _SEQ
     _SEQ += 1
     path = _BASE / f"benchcli{_SEQ:02d}"
+    # 序号在多次运行之间会复用：先清干净，否则上一轮的文件会让"文件个数"类断言假失败
+    shutil.rmtree(path, ignore_errors=True)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -162,6 +164,105 @@ def test_main_reports_a_missing_task_set_readably() -> None:
     module = _load()
     code = module.main(["--provider", "mock", "--tasks", str(_ROOT / "nope.json")])
     assert code == 2, "任务集读不到应当以可读提示 + 退出码 2 结束"
+
+
+# ── 消融（决定 A：`--group` 装配；G：`--ablation` 对比） ──
+
+
+def test_group_run_applies_the_group_and_snapshots_it() -> None:
+    """`--group memory` 必须在**本次运行**里带上开关覆盖，并把快照写进报告。"""
+    module = _load()
+    out = _new_dir()
+    try:
+        code = module.main(
+            ["--provider", "mock", "--group", "memory", "--limit", "2", "--out", str(out)]
+        )
+        assert code == 0
+        import json
+
+        reports = list(out.glob("*.json"))
+        assert len(reports) == 1, reports
+        config = json.loads(reports[0].read_text(encoding="utf-8"))["config"]
+        assert config["group"] == "memory"
+        assert config["memory"] is True
+        assert config["compaction"] is False
+        assert config["session_scope"] == "run", "memory 组要用运行内共享会话"
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_an_unknown_group_is_rejected_readably() -> None:
+    module = _load()
+    assert module.main(["--provider", "mock", "--group", "nope"]) == 2
+
+
+def test_ablation_run_saves_four_reports_and_a_comparison() -> None:
+    """三份组报告 + 一份对比报告：`--ablation --limit 2` 在 mock 下必须跑完。"""
+    module = _load()
+    out = _new_dir()
+    try:
+        code = module.main(
+            ["--provider", "mock", "--ablation", "--limit", "2", "--out", str(out)]
+        )
+        assert code == 0
+        names = {path.name for path in out.glob("*.json")}
+        assert len(names) == 4, names
+        assert any(name.endswith("-ablation.json") for name in names), names
+        import json
+
+        comparisons = [
+            path for path in out.glob("*.json") if path.name.endswith("-ablation.json")
+        ]
+        data = json.loads(comparisons[0].read_text(encoding="utf-8"))
+        assert data["kind"] == "ablation"
+        assert set(data["groups"]) == {"baseline", "memory", "memory+compaction"}
+        for group_report in data["groups"].values():
+            assert group_report["metrics"]["tasks_total"] == 2
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_format_ablation_prints_a_side_by_side_table() -> None:
+    """并排表：每组一列、`None` 显示 `—`、followup 单独一行、差值表带相对值。"""
+    module = _load()
+    from agent_runtime.core.benchmark.ablation import AblationReport
+    from agent_runtime.core.benchmark.models import BenchmarkMetrics, BenchmarkReport
+
+    def group_report(name: str, success: float, tokens: int) -> BenchmarkReport:
+        return BenchmarkReport(
+            run_id=f"ab-{name}",
+            config={"group": name},
+            metrics=BenchmarkMetrics(
+                tasks_total=10,
+                success_rate=success,
+                success_rate_measured=None,
+                avg_steps=4.0,
+                summarizer_tokens=tokens,
+                compaction_events=0,
+            ),
+        )
+
+    report = AblationReport(
+        ablation_id="ab-1",
+        groups={
+            "baseline": group_report("baseline", 0.5, 0),
+            "memory": group_report("memory", 0.8, 0),
+        },
+        deltas={
+            "baseline": {"success_rate": {"baseline": 0.5, "group": 0.5, "abs": 0.0, "rel": 0.0}},
+            "memory": {"success_rate": {"baseline": 0.5, "group": 0.8, "abs": 0.3, "rel": 0.6}},
+        },
+        role_metrics={
+            "baseline": {"followup": {"tasks": 2, "success_rate": 0.0}},
+            "memory": {"followup": {"tasks": 2, "success_rate": 1.0}},
+        },
+    )
+    text = module.format_ablation(report)
+    assert "baseline" in text and "memory" in text
+    assert "50.0%" in text and "80.0%" in text
+    assert "followup 成功率" in text
+    assert "+60.0%" in text, text
+    assert "—" in text, "没测的指标必须是 —（success_rate_measured=None）"
 
 
 def _run_all() -> None:

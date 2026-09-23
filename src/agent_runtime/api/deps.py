@@ -116,16 +116,56 @@ def get_tracer() -> Tracer:
     return Tracer()
 
 
-def get_llm():
-    """真实 Provider。惰性 import：未安装 openai 时本模块仍可导入（测试/降级友好）。"""
+def _llm_for(settings: Settings):
+    """按给定 settings 造 Provider。惰性 import：未安装 openai 时本模块仍可导入。"""
     from agent_runtime.infrastructure.llm.openai_compatible import OpenAICompatibleProvider
 
-    s = get_settings()
     return OpenAICompatibleProvider(
-        api_key=s.llm_api_key,
-        base_url=s.llm_base_url,
-        model=s.llm_model,
-        temperature=s.llm_temperature,
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
+        model=settings.llm_model,
+        temperature=settings.llm_temperature,
+    )
+
+
+def get_llm():
+    """真实 Provider（进程单例配置）。"""
+    return _llm_for(get_settings())
+
+
+def build_agent_for_settings(settings: Settings) -> ReActLoop:
+    """按**给定** settings 装配一个 agent（不缓存、不碰单例）。消融三组专用。
+
+    为什么不能用 `get_agent()`：`get_settings` / `get_memory_manager` 是 `lru_cache` 单例，
+    **一个进程只有一种配置** —— 三组要各装一次（只改开关、不改 `.env`），只能拿覆盖后的 settings 自己装。
+    工具 registry 与技能 router 与这三组的自变量无关，仍共享单例（MCP 工具必须留在同一个 registry 里）。
+
+    **每组只装一次、组内任务共用**：memory 组的 `session_scope=run` 要靠同一份记忆实例才成立；
+    逐任务新建记忆实例等于把这一组测成空的。`ContextManager` 每次 `build()` 会清空消息，不会串任务。
+    """
+    from agent_runtime.infrastructure.context.catalog import build_context_manager
+    from agent_runtime.infrastructure.memory.catalog import build_memory_manager
+
+    memory, memory_errors = build_memory_manager(settings)
+    context, context_errors = build_context_manager(settings)
+    # 装配问题照样要可见（与 get_memory_manager/get_context_manager 同一份列表）
+    _memory_errors.extend(memory_errors)
+    _context_errors.extend(context_errors)
+
+    provider = _llm_for(settings)
+    planner = TaskPlanner(llm=provider) if settings.agent_task_planning_enabled else None
+    return ReActLoop(
+        llm=provider,
+        tool_registry=get_tool_registry(),
+        context_manager=context,
+        memory_manager=memory,
+        skill_router=get_skill_router(),
+        planner=planner,
+        skill_top_k=settings.agent_skill_top_k,
+        recall_top_k=settings.memory_recall_top_k,
+        tracer=get_tracer(),
+        max_steps=settings.agent_max_steps,
+        tool_timeout=float(settings.agent_tool_timeout_seconds),
     )
 
 

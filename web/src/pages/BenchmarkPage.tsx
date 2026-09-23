@@ -190,7 +190,8 @@ export default function BenchmarkPage() {
                 >
                   <div className="font-mono">{run.run_id}</div>
                   <div className="opacity-70">
-                    {run.config?.provider ?? "?"} · {run.metrics.tasks_total} 条 · 成功率{" "}
+                    {run.config?.group ?? "—"} · {run.config?.provider ?? "?"} ·{" "}
+                    {run.metrics.tasks_total} 条 · 成功率{" "}
                     {render(run.metrics.success_rate, "pct")}
                   </div>
                 </button>
@@ -206,7 +207,8 @@ export default function BenchmarkPage() {
               <div className="text-xs text-slate-500">
                 <span className="font-mono">{selected.run_id}</span> · provider{" "}
                 <span className="font-medium">{selected.config?.provider ?? "?"}</span> · 模型{" "}
-                {selected.config?.model ?? "?"} · {selected.created_at}
+                {selected.config?.model ?? "?"} · 分组 {selected.config?.group ?? "—"} ·{" "}
+                {selected.created_at}
                 {(selected.config?.synthetic === true ||
                   selected.config?.provider === "mock") && (
                   <div className="mt-1 rounded bg-amber-50 p-1 text-amber-700">

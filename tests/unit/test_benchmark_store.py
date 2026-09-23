@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
+from agent_runtime.core.benchmark.ablation import AblationReport  # noqa: E402
 from agent_runtime.core.benchmark.models import (  # noqa: E402
     BenchmarkMetrics,
     BenchmarkReport,
@@ -23,6 +24,7 @@ from agent_runtime.core.benchmark.models import (  # noqa: E402
 from agent_runtime.infrastructure.benchmark.store import (  # noqa: E402
     list_runs,
     load_report,
+    save_ablation,
     save_report,
 )
 
@@ -101,6 +103,63 @@ def test_list_runs_skips_broken_files_instead_of_raising() -> None:
         (directory / "wrong-shape.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")
         runs = list_runs(str(directory))
         assert [r["run_id"] for r in runs] == ["good"]
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+# ── 消融对比报告（与单组报告同目录，但**不是**一份单组报告） ──
+
+
+def _ablation(ablation_id: str) -> AblationReport:
+    return AblationReport(
+        ablation_id=ablation_id,
+        baseline="baseline",
+        groups={"baseline": _report("group-run")},
+        deltas={"baseline": {"success_rate": {"baseline": 1.0, "group": 1.0, "abs": 0.0, "rel": 0.0}}},
+        role_metrics={"baseline": {"followup": {"tasks": 0, "success_rate": None}}},
+        config={"provider": "mock", "groups": ["baseline"]},
+        created_at=datetime(2026, 9, 21, 12, 0, 0),
+    )
+
+
+def test_save_ablation_writes_a_kind_marked_file() -> None:
+    directory = _new_dir()
+    try:
+        path = save_ablation(_ablation("ab-1"), str(directory))
+        assert Path(path).name == "ab-1.json"
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        assert data["kind"] == "ablation", "类型标记是历史列表跳过它的依据"
+        assert data["ablation_id"] == "ab-1"
+        assert "baseline" in data["groups"] and "baseline" in data["deltas"]
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_an_ablation_file_is_not_read_as_a_single_run_report() -> None:
+    """对比报告的结构与单组报告不同：`load_report`/`list_runs` 必须当它是"另一类东西"。
+
+    否则历史列表会冒出一条 `run_id=""` 的幽灵报告（三组报告已经各自在里面了）。
+    """
+    directory = _new_dir()
+    try:
+        save_report(_report("run-1"), str(directory))
+        save_ablation(_ablation("ab-1"), str(directory))
+        assert [r["run_id"] for r in list_runs(str(directory))] == ["run-1"]
+        assert load_report("ab-1", str(directory)) is None
+        assert load_report("run-1", str(directory)) is not None
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_save_ablation_rejects_an_unsafe_id() -> None:
+    directory = _new_dir()
+    try:
+        with_raises = False
+        try:
+            save_ablation(_ablation("../escape"), str(directory))
+        except ValueError:
+            with_raises = True
+        assert with_raises, "同上：ablation_id 也会变成文件名"
     finally:
         shutil.rmtree(directory, ignore_errors=True)
 

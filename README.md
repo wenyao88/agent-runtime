@@ -222,12 +222,13 @@ AGENT_CONTEXT_COMPACTION_THRESHOLD=0.8
 ## Benchmark：跑任务集，产出可复现的数字
 
 ```bash
-python scripts/run_benchmark.py --provider mock            # 离线跑全量 20 条（不需要 key / 网络）
+python scripts/run_benchmark.py --provider mock            # 离线跑全量 100 条（不需要 key / 网络）
 python scripts/run_benchmark.py --provider real --limit 3  # 真实链路抽样（会花钱）
 python scripts/run_benchmark.py --provider real --judge 3  # 另抽 3 条做 LLM 裁判
 ```
 
-任务集在 `benchmarks/tasks.json`（20 条：GitHub 分析 10 + 技术调研 10）；报告写到 `benchmark_runs/`（已 gitignore）。
+任务集在 `benchmarks/tasks.json`（100 条：GitHub 分析 50 + 技术调研 50，其中每类 10 对"成对相关任务"）；
+报告写到 `benchmark_runs/`（已 gitignore）。
 也可走 API（`GET /api/benchmarks`、`GET /api/benchmarks/{run_id}`、`POST /api/benchmarks/run`），前端 **Benchmark** 页
 可看历史运行与逐任务明细。
 
@@ -251,7 +252,40 @@ python scripts/run_benchmark.py --provider real --judge 3  # 另抽 3 条做 LLM
 
 天花板：每步 token 未统计（一次响应可含多个工具调用，归属口径不明确）；串行执行（100+ 条时再加并发）；
 报告存 JSON 文件、未入库；**压缩比可以为负**（那说明 `after > before`，即上下文变大，属于真实数据不加修饰）；
-`list_runs` 按 ISO 字符串排序（写入带时区偏移的时间戳时会失真）；真实 20 条成绩与裁判评分只能在你的机器上跑出来。
+`list_runs` 按 ISO 字符串排序（写入带时区偏移的时间戳时会失真）；真实 100 条成绩与裁判评分只能在你的机器上跑出来。
+
+### 消融实验：记忆/压缩到底有没有用
+
+```bash
+# 单组（带设置覆盖，只影响这一次运行，不改 .env）
+python scripts/run_benchmark.py --provider real --group baseline --limit 3
+python scripts/run_benchmark.py --provider real --group memory --limit 3
+# 三组一起跑 + 并排对比（每组各跑 --limit 条；落盘 3 份组报告 + 1 份对比报告）
+python scripts/run_benchmark.py --provider real --ablation --limit 3
+python scripts/run_benchmark.py --provider mock --ablation --limit 3   # 离线自检：只证明管线通
+```
+
+| 组 | memory | compaction | 会话范围 |
+|---|---|---|---|
+| `baseline` | 关 | 关 | 逐任务隔离 |
+| `memory` | short_term **且** long_term 开 | 关 | **整轮共享**（`bench-<run_id>`） |
+| `memory+compaction` | 同上 | SUMMARIZE 开 | 整轮共享 |
+
+**方法说明（读结论前必看）**：
+
+1. **`compaction=off` 只等于 `SUMMARIZE` 关**：SQUEEZE/TRUNCATE 是超预算后的无条件行为，三组都会压。
+   第三组的自变量只有"要不要额外花一次 LLM 摘要"。
+2. **`memory` 组是整轮共享会话**，所以组内靠后的任务受益于靠前的任务 —— 顺序相关，**不能**拿它和
+   `baseline` 的绝对名次直接比；成对任务里的 `followup` 单独统计，那才是记忆效应的直接观测点。
+3. `memory` 组必须开 `long_term`（向量召回）：`working`/`short_term` 的文本匹配方向是"整段 query 是条目内容的
+   子串"，长任务文本几乎命不中 —— 只开 short_term 等于测空气。
+4. 报告自带开关快照（`config.group/memory/compaction/session_scope`），三组必须是**同一任务集、同一模型、
+   同一版本代码**；对比报告 `kind: "ablation"`，与组报告同目录但不出现在历史列表里。
+5. 相对差 = 绝对差 / baseline；baseline 为 0 或指标为"没测"（`—`）时相对差算不出来，同样显示 `—`。
+
+天花板：不做统计显著性检验（100 级样本只给均值与计数）；不做并发；judge 单次采样，噪声未消除；
+对比报告只按 `pair_role` 切分**逐任务判分**（成功率/步数/token），压缩与摘要成本只能看整组合计 ——
+事件流不进单组报告，所以没法按角色拆分。
 
 ## 输出可信度（防幻觉）
 

@@ -60,6 +60,89 @@ def format_metrics(metrics: object) -> str:
     return "\n".join(lines)
 
 
+_ABLATION_ROWS = (
+    ("任务数", "tasks_total", "int"),
+    ("成功率", "success_rate", "pct"),
+    ("成功率(排除 provider)", "success_rate_measured", "pct"),
+    ("工具选择准确率", "tool_selection_accuracy", "pct"),
+    ("平均步数", "avg_steps", "num"),
+    ("平均 token", "avg_total_tokens", "num"),
+    ("provider 错误", "provider_errors", "int"),
+    ("压缩事件", "compaction_events", "int"),
+    ("摘要 token", "summarizer_tokens", "int"),
+    ("摘要耗时(ms)", "summarizer_ms", "int"),
+    ("压缩比", "compression_ratio", "pct"),
+)
+
+_ABLATION_ROLE_ROWS = (
+    ("followup 任务数", "tasks", "int"),
+    ("followup 成功率", "success_rate", "pct"),
+    ("followup 平均步数", "avg_steps", "num"),
+    ("followup 平均 token", "avg_total_tokens", "num"),
+)
+
+_DELTA_ROWS = (
+    ("成功率", "success_rate", "pct"),
+    ("平均步数", "avg_steps", "num"),
+    ("平均 token", "avg_total_tokens", "num"),
+    ("摘要 token", "summarizer_tokens", "int"),
+    ("压缩事件", "compaction_events", "int"),
+    ("followup 成功率", "role.followup.success_rate", "pct"),
+    ("followup 平均步数", "role.followup.avg_steps", "num"),
+)
+
+
+def format_ablation(report: object) -> str:
+    """消融并排表：各组**绝对指标** + 相对 baseline 的**差值**（绝对与相对）。
+
+    绝对值表回答"三组各自跑成什么样"，差值表回答"比 baseline 好/差多少"。
+    `None` 一律 `—`（没测 ≠ 0），相对差在 baseline 为 0 或没测时算不出来，同样是 `—`。
+    """
+    groups = [str(name) for name in getattr(report, "groups", {})]
+    baseline = str(getattr(report, "baseline", "baseline"))
+    width = 22
+    col = 18
+    lines = [
+        f"分组对比（baseline = {baseline}）",
+        "指标".ljust(width) + "".join(name.rjust(col) for name in groups),
+        "─" * (width + col * len(groups)),
+    ]
+
+    def row(label: str, values: list[str]) -> str:
+        return label.ljust(width) + "".join(value.rjust(col) for value in values)
+
+    reports = getattr(report, "groups", {})
+    for label, key, kind in _ABLATION_ROWS:
+        values = [
+            _render(getattr(reports[name].metrics, key, None), kind) for name in groups
+        ]
+        lines.append(row(label, values))
+
+    role_metrics = getattr(report, "role_metrics", {})
+    for label, key, kind in _ABLATION_ROLE_ROWS:
+        values = [
+            _render((role_metrics.get(name, {}).get("followup") or {}).get(key), kind)
+            for name in groups
+        ]
+        lines.append(row(label, values))
+
+    lines.append("")
+    lines.append("相对 baseline 的差（绝对值 · 相对值）")
+    lines.append("指标".ljust(width) + "".join(name.rjust(18) for name in groups))
+    lines.append("─" * (width + 18 * len(groups)))
+    deltas = getattr(report, "deltas", {})
+    for label, key, kind in _DELTA_ROWS:
+        values = []
+        for name in groups:
+            delta = (deltas.get(name) or {}).get(key) or {}
+            absolute = _render(delta.get("abs"), kind)
+            relative = delta.get("rel")
+            relative_text = "—" if relative is None else f"{float(relative) * 100:+.1f}%"
+            values.append(f"{absolute} · {relative_text}")
+        lines.append(label.ljust(width) + "".join(value.rjust(18) for value in values))
+    return "\n".join(lines)
+
+
 def format_verdicts(verdicts: list, limit: int = 50) -> str:
     """逐任务明细；失败必须带上原因（缺哪个工具/关键词，或错误）。"""
     lines: list[str] = []
@@ -119,29 +202,203 @@ def _real_agent_factory():
     return real_agent_factory(get_agent)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Benchmark：跑任务集并产出报告")
-    parser.add_argument(
-        "--provider", choices=["mock", "real"], default="mock",
-        help="mock = 离线假 agent（不需要 key）；real = 真实 LLM",
-    )
-    parser.add_argument("--limit", type=int, default=None, help="只跑前 N 条（默认全量）")
-    parser.add_argument("--judge", type=int, default=0, help="对前 N 条做 LLM 裁判（默认 0 = 不跑）")
-    parser.add_argument("--tasks", default="", help="任务集 JSON 路径（默认取 BENCHMARK_TASKS_FILE）")
-    parser.add_argument("--out", default="", help="报告落盘目录（默认取 BENCHMARK_RUNS_DIR）")
-    args = parser.parse_args(argv)
+def _grouped_agent_factory():
+    """真实 provider + 分组：用**该组覆盖后的** settings 装配（不碰 lru_cache 单例）。
 
-    from agent_runtime.core.benchmark.dataset import load_tasks
+    每组装一次、组内任务共用同一个 agent —— memory 组的 `session_scope=run` 要靠同一份记忆实例
+    才成立；逐任务新建记忆实例等于把这一组测成空的。
+    """
+    try:
+        from agent_runtime.api.deps import build_agent_for_settings
+    except Exception as e:  # noqa: BLE001
+        print(f"错误：真实链路需要完整依赖（fastapi / pydantic_settings / openai）：{type(e).__name__}: {e}")
+        return None
+    from agent_runtime.infrastructure.benchmark.catalog import real_agent_factory
+
+    def factory_for_settings(grouped):
+        agent = build_agent_for_settings(grouped)
+        return real_agent_factory(lambda: agent)
+
+    return factory_for_settings
+
+
+def _model_label(settings: object, provider: str) -> str:
+    from agent_runtime.infrastructure.benchmark.catalog import MOCK_PROVIDER
+
+    return "mock" if provider == MOCK_PROVIDER else str(getattr(settings, "llm_model", ""))
+
+
+def _progress_printer():
+    def on_progress(done: int, count: int, verdict: object) -> None:
+        mark = "✓" if getattr(verdict, "success", False) else "✗"
+        print(f"{mark} [{done}/{count}] {getattr(verdict, 'task_id', '?')}")
+
+    return on_progress
+
+
+def _run_one_group(args, settings, tasks, runs_dir, group) -> int:
+    """跑单组：`--group` 给定时带设置覆盖，否则就是 Phase 6 的常规单轮评测。"""
+    from agent_runtime.core.benchmark.ablation import group_overrides
     from agent_runtime.infrastructure.benchmark.catalog import (
         MOCK_PROVIDER,
+        build_group_runner,
         build_runner,
-        resolve_runs_dir,
-        resolve_tasks_file,
     )
     from agent_runtime.infrastructure.benchmark.service import (
         benchmark_config,
         new_run_id,
         run_and_save,
+    )
+
+    extra: dict = {}
+    agent_factory = None
+    if group is None:
+        if args.provider != MOCK_PROVIDER:
+            agent_factory = _real_agent_factory()
+            if agent_factory is None:
+                return 2
+        runner, build_errors = build_runner(
+            settings, args.provider, agent_factory=agent_factory
+        )
+    else:
+        factory_for_settings = None
+        if args.provider != MOCK_PROVIDER:
+            factory_for_settings = _grouped_agent_factory()
+            if factory_for_settings is None:
+                return 2
+        runner, build_errors = build_group_runner(
+            settings,
+            args.provider,
+            group,
+            agent_factory_for_settings=factory_for_settings,
+        )
+        extra = group_overrides(group)
+        print(f"分组：{group.name}（memory={group.memory}, compaction={group.compaction}, "
+              f"session_scope={group.session_scope}）")
+    for error in build_errors:
+        print(f"⚠ {error}")
+
+    config = benchmark_config(
+        args.provider, model=_model_label(settings, args.provider), judge=args.judge, **extra
+    )
+    total = len(tasks) if args.limit is None else min(max(0, args.limit), len(tasks))
+    print(f"\n跑 {total} 条任务（provider={args.provider}, judge={config['judge']}）\n" + "─" * 72)
+
+    report = asyncio.run(
+        run_and_save(
+            runner,
+            tasks,
+            runs_dir=runs_dir,
+            config=config,
+            limit=args.limit,
+            run_id=new_run_id(args.provider),
+            on_progress=_progress_printer(),
+        )
+    )
+
+    print("\n" + "─" * 72)
+    print(format_verdicts(report.verdicts))
+    print("\n" + format_metrics(report.metrics))
+    print(f"\n报告：{Path(runs_dir) / (report.run_id + '.json')}")
+    if report.config.get("save_error"):
+        print(f"⚠ 报告落盘失败：{report.config['save_error']}")
+    if args.provider == MOCK_PROVIDER:
+        print("注意：provider=mock 是离线夹具（合成事件 + 直接按任务声明调用工具），不是真实成绩。")
+    return 0
+
+
+def _run_ablation(args, settings, tasks, runs_dir) -> int:
+    """跑三组并落盘四份文件（三份组报告 + 一份对比报告），最后打印并排表。"""
+    from agent_runtime.core.benchmark.ablation import AblationRunner
+    from agent_runtime.infrastructure.benchmark.catalog import (
+        MOCK_PROVIDER,
+        build_group_runner,
+    )
+    from agent_runtime.infrastructure.benchmark.service import new_run_id, run_ablation
+
+    factory_for_settings = None
+    if args.provider != MOCK_PROVIDER:
+        factory_for_settings = _grouped_agent_factory()
+        if factory_for_settings is None:
+            return 2
+
+    build_errors: list[str] = []
+
+    def runner_factory(group):
+        runner, errors = build_group_runner(
+            settings,
+            args.provider,
+            group,
+            agent_factory_for_settings=factory_for_settings,
+        )
+        build_errors.extend(errors)
+        return runner
+
+    ablation_id = f"{new_run_id(args.provider)}-ablation"
+    total = len(tasks) if args.limit is None else min(max(0, args.limit), len(tasks))
+    print(
+        f"\n消融：三组各跑 {total} 条任务（provider={args.provider}, judge={args.judge}）\n"
+        + "─" * 72
+    )
+    report = asyncio.run(
+        run_ablation(
+            AblationRunner(runner_factory),
+            tasks,
+            runs_dir=runs_dir,
+            provider=args.provider,
+            model=_model_label(settings, args.provider),
+            judge=args.judge,
+            limit=args.limit,
+            ablation_id=ablation_id,
+            on_group=lambda name: print(f"\n=== 分组 {name} ==="),
+            on_progress=_progress_printer(),
+        )
+    )
+    for error in build_errors:
+        print(f"⚠ {error}")
+
+    print("\n" + "─" * 72)
+    print(format_ablation(report))
+    print(f"\n对比报告：{Path(runs_dir) / (report.ablation_id + '.json')}")
+    print("三份组报告同在报告目录里（文件名以对比报告 id 开头）。")
+    if report.config.get("save_error"):
+        print(f"⚠ 报告落盘失败：{report.config['save_error']}")
+    print(
+        "方法说明：三组同一任务集/同一模型/同一版本代码，只改开关；`compaction=off` **只等于 SUMMARIZE 关**"
+        "（SQUEEZE/TRUNCATE 无条件生效）；memory 组用运行内共享会话，组内靠后的任务受益于靠前的任务，"
+        "所以**不要**拿它和 baseline 的绝对名次直接比。"
+    )
+    if args.provider == MOCK_PROVIDER:
+        print("注意：provider=mock 是离线夹具，这里的对比表只证明管线通，不是真实结论。")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Benchmark：跑任务集并产出报告（含消融三组对照）")
+    parser.add_argument(
+        "--provider", choices=["mock", "real"], default="mock",
+        help="mock = 离线假 agent（不需要 key）；real = 真实 LLM",
+    )
+    parser.add_argument("--limit", type=int, default=None, help="只跑前 N 条（默认全量；消融时三组各跑 N 条）")
+    parser.add_argument("--judge", type=int, default=0, help="对前 N 条做 LLM 裁判（默认 0 = 不跑）")
+    parser.add_argument("--tasks", default="", help="任务集 JSON 路径（默认取 BENCHMARK_TASKS_FILE）")
+    parser.add_argument("--out", default="", help="报告落盘目录（默认取 BENCHMARK_RUNS_DIR）")
+    parser.add_argument(
+        "--group", default="",
+        help="只跑某一组并带设置覆盖：baseline / memory / memory+compaction",
+    )
+    parser.add_argument(
+        "--ablation", action="store_true",
+        help="跑三组并落盘四份报告 + 打印并排对比（会跑三倍时间/花费）",
+    )
+    args = parser.parse_args(argv)
+
+    from agent_runtime.core.benchmark.ablation import find_group
+    from agent_runtime.core.benchmark.dataset import load_tasks
+    from agent_runtime.infrastructure.benchmark.catalog import (
+        MOCK_PROVIDER,
+        resolve_runs_dir,
+        resolve_tasks_file,
     )
 
     settings = _load_settings()
@@ -155,49 +412,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"错误：任务集为空或读不到（{tasks_file}）")
         return 2
 
-    agent_factory = None
-    if args.provider != MOCK_PROVIDER:
-        agent_factory = _real_agent_factory()
-        if agent_factory is None:
+    if args.ablation:
+        return _run_ablation(args, settings, tasks, runs_dir)
+
+    group = None
+    if args.group:
+        group = find_group(args.group)
+        if group is None:
+            print(
+                f"错误：未知的分组 {args.group!r}；可选：baseline / memory / memory+compaction"
+            )
             return 2
-
-    runner, build_errors = build_runner(settings, args.provider, agent_factory=agent_factory)
-    for error in build_errors:
-        print(f"⚠ {error}")
-
-    config = benchmark_config(
-        args.provider,
-        model="mock" if args.provider == MOCK_PROVIDER else str(getattr(settings, "llm_model", "")),
-        judge=args.judge,
-    )
-    total = len(tasks) if args.limit is None else min(max(0, args.limit), len(tasks))
-    print(f"\n跑 {total} 条任务（provider={args.provider}, judge={config['judge']}）\n" + "─" * 72)
-
-    def on_progress(done: int, count: int, verdict: object) -> None:
-        mark = "✓" if getattr(verdict, "success", False) else "✗"
-        print(f"{mark} [{done}/{count}] {getattr(verdict, 'task_id', '?')}")
-
-    report = asyncio.run(
-        run_and_save(
-            runner,
-            tasks,
-            runs_dir=runs_dir,
-            config=config,
-            limit=args.limit,
-            run_id=new_run_id(args.provider),
-            on_progress=on_progress,
-        )
-    )
-
-    print("\n" + "─" * 72)
-    print(format_verdicts(report.verdicts))
-    print("\n" + format_metrics(report.metrics))
-    print(f"\n报告：{Path(runs_dir) / (report.run_id + '.json')}")
-    if report.config.get("save_error"):
-        print(f"⚠ 报告落盘失败：{report.config['save_error']}")
-    if args.provider == MOCK_PROVIDER:
-        print("注意：provider=mock 是离线夹具（合成事件 + 直接按任务声明调用工具），不是真实成绩。")
-    return 0
+    return _run_one_group(args, settings, tasks, runs_dir, group)
 
 
 if __name__ == "__main__":

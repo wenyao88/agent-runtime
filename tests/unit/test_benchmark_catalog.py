@@ -15,10 +15,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
+from agent_runtime.core.benchmark.ablation import find_group  # noqa: E402
 from agent_runtime.core.benchmark.dataset import load_tasks  # noqa: E402
 from agent_runtime.core.benchmark.models import BenchmarkTask  # noqa: E402
 from agent_runtime.infrastructure.benchmark.catalog import (  # noqa: E402
     MOCK_PROVIDER,
+    build_group_runner,
     build_runner,
     real_agent_factory,
     resolve_runs_dir,
@@ -39,6 +41,11 @@ class _FakeSettings:
         self.llm_api_key = ""
         self.llm_base_url = "http://main/v1"
         self.tool_http_timeout_seconds = 20.0
+        # 消融自变量：三组只改这四个开关
+        self.memory_short_term_enabled = False
+        self.memory_long_term_enabled = False
+        self.memory_consolidate_enabled = False
+        self.agent_compaction_summarize_enabled = False
         for key, value in overrides.items():
             setattr(self, key, value)
 
@@ -71,7 +78,7 @@ def test_mock_provider_builds_a_runner_without_errors() -> None:
 
 
 def test_mock_runner_completes_the_whole_task_set_offline() -> None:
-    """沙箱内最有价值的一条：20 条任务 → 事件 → 判分 → 指标 → 报告，全程不碰网络与 LLM。"""
+    """沙箱内最有价值的一条：100 条任务 → 事件 → 判分 → 指标 → 报告，全程不碰网络与 LLM。"""
     runner, _ = build_runner(_FakeSettings(), MOCK_PROVIDER)
     report = asyncio.run(
         runner.run(
@@ -81,8 +88,8 @@ def test_mock_runner_completes_the_whole_task_set_offline() -> None:
         )
     )
     assert report.config["provider"] == "mock", "报告必须写清 provider，mock 不能被当成真实成绩"
-    assert report.config["tasks_total"] == 20
-    assert len(report.verdicts) == 20
+    assert report.config["tasks_total"] == 100
+    assert len(report.verdicts) == 100
     assert all(v.success for v in report.verdicts), [
         (v.task_id, v.missing_tools, v.missing_keywords) for v in report.verdicts if not v.success
     ]
@@ -91,12 +98,66 @@ def test_mock_runner_completes_the_whole_task_set_offline() -> None:
     assert metrics.tool_selection_accuracy == 1.0
     assert metrics.tool_argument_accuracy == 1.0, "github 任务声明的 repo 参数应当命中"
     assert metrics.compression_ratio == 0.75, "mock 事件是确定性的"
-    assert metrics.compaction_events == 20, "每条任务一个合成的压缩事件"
-    assert metrics.compaction_events_by_strategy == {"summarize": 20}
-    assert metrics.summarizer_tokens == 210 * 20, "摘要成本也要能从 mock 管线流到指标里"
-    assert metrics.summarizer_ms == 120 * 20
+    assert metrics.compaction_events == 100, "每条任务一个合成的压缩事件"
+    assert metrics.compaction_events_by_strategy == {"summarize": 100}
+    assert metrics.summarizer_tokens == 210 * 100, "摘要成本也要能从 mock 管线流到指标里"
+    assert metrics.summarizer_ms == 120 * 100
     assert metrics.error_recovery_rate is None, "mock 没有失败的工具调用 → 该指标应为 None"
     assert metrics.avg_steps and metrics.avg_steps > 1
+
+
+def test_build_group_runner_applies_the_group_settings() -> None:
+    """回归（开跑前检查 #1 + 决定 A）：三组必须在**同一进程**里各装一次。
+
+    具体做法是**设置覆盖**（`apply_group`）而不是改 `.env` —— 改 `.env` 需要重启进程，
+    而 `get_settings`/`get_memory_manager` 是 `lru_cache` 单例，一进程只有一种配置。
+    """
+    settings = _FakeSettings()
+    seen: list = []
+
+    def agent_factory_for_settings(grouped):
+        seen.append(grouped)
+        return None  # None → mock 夹具；这里只关心"拿到的是哪份 settings"
+
+    runner, errors = build_group_runner(
+        settings, MOCK_PROVIDER, find_group("memory"), agent_factory_for_settings=agent_factory_for_settings
+    )
+    assert errors == []
+    assert runner.session_scope == "run", "memory 组要用运行内共享会话（否则记忆跨不了任务）"
+    grouped = seen[0]
+    assert grouped.memory_short_term_enabled is True
+    assert grouped.memory_long_term_enabled is True, "只开 short_term 等于测空气（文本匹配方向不对）"
+    assert grouped.memory_consolidate_enabled is False, "整理成本留给压缩组，便于归因"
+    assert settings.memory_short_term_enabled is False, "原 settings 绝不能被就地改掉"
+
+
+def test_group_runners_are_isolated_from_each_other() -> None:
+    settings = _FakeSettings()
+    seen: list = []
+
+    def agent_factory_for_settings(grouped):
+        seen.append(grouped)
+        return None
+
+    baseline, _ = build_group_runner(
+        settings, MOCK_PROVIDER, find_group("baseline"),
+        agent_factory_for_settings=agent_factory_for_settings,
+    )
+    compaction, _ = build_group_runner(
+        settings, MOCK_PROVIDER, find_group("memory+compaction"),
+        agent_factory_for_settings=agent_factory_for_settings,
+    )
+    assert baseline.session_scope == "task"
+    assert compaction.session_scope == "run"
+    assert seen[0].agent_compaction_summarize_enabled is False
+    assert seen[1].agent_compaction_summarize_enabled is True
+    assert seen[0] is not seen[1], "两组必须是各自独立的 settings 对象"
+
+
+def test_build_group_runner_rejects_an_unknown_group() -> None:
+    runner, errors = build_group_runner(_FakeSettings(), MOCK_PROVIDER, None)
+    assert runner is None
+    assert len(errors) == 1 and "分组" in errors[0], errors
 
 
 def test_a_custom_factory_receives_each_task() -> None:

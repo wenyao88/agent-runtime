@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 import sys
@@ -15,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
+from agent_runtime.core.benchmark.ablation import AblationRunner  # noqa: E402
 from agent_runtime.core.benchmark.models import BenchmarkReport  # noqa: E402
 from agent_runtime.infrastructure.benchmark.catalog import (  # noqa: E402
     MOCK_PROVIDER,
@@ -22,6 +24,7 @@ from agent_runtime.infrastructure.benchmark.catalog import (  # noqa: E402
 )
 from agent_runtime.infrastructure.benchmark.service import (  # noqa: E402
     new_run_id,
+    run_ablation,
     run_and_save,
 )
 from agent_runtime.infrastructure.benchmark.store import load_report  # noqa: E402
@@ -35,6 +38,8 @@ def _new_dir() -> Path:
     global _SEQ
     _SEQ += 1
     path = _BASE / f"benchservice{_SEQ:02d}"
+    # 目录序号在多次运行之间会复用：先清干净，否则上一轮留下的报告会让"文件清单"类断言假失败
+    shutil.rmtree(path, ignore_errors=True)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -162,6 +167,65 @@ def test_runner_receives_the_fixed_run_id() -> None:
         )
     )
     assert report.run_id == "want-this-id"
+
+
+# ── 消融落盘（Phase 7） ──
+
+
+def _mock_runner_factory(group):
+    runner, errors = build_runner(_FakeSettings(), MOCK_PROVIDER)
+    assert errors == []
+    return runner
+
+
+def test_run_ablation_saves_three_group_reports_and_one_comparison() -> None:
+    """四份文件：三份组报告 + 一份对比报告。少了组报告就没法逐组回看，少了对比就没有结论。"""
+    directory = _new_dir()
+    try:
+        report = asyncio.run(
+            run_ablation(
+                AblationRunner(_mock_runner_factory),
+                _tasks(2),
+                runs_dir=str(directory),
+                provider=MOCK_PROVIDER,
+                ablation_id="ab-1",
+            )
+        )
+        files = {path.name for path in directory.glob("*.json")}
+        assert files == {
+            "ab-1.json",
+            "ab-1-baseline.json",
+            "ab-1-memory.json",
+            "ab-1-memory_compaction.json",
+        }, files
+        assert load_report("ab-1-baseline", str(directory)).config["group"] == "baseline"
+        data = json.loads((directory / "ab-1.json").read_text(encoding="utf-8"))
+        assert data["kind"] == "ablation"
+        assert set(data["groups"]) == {"baseline", "memory", "memory+compaction"}
+        assert set(data["role_metrics"]) == {"baseline", "memory", "memory+compaction"}
+        assert "save_error" not in report.config
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_an_ablation_save_failure_does_not_lose_the_report() -> None:
+    """落盘目录不可用时，三组结果必须照样返回，且失败原因可见（不静默）。"""
+    blocker = _new_dir() / "not-a-directory"
+    blocker.write_text("x", encoding="utf-8")
+    report = asyncio.run(
+        run_ablation(
+            AblationRunner(_mock_runner_factory),
+            _tasks(1),
+            runs_dir=str(blocker),
+            provider=MOCK_PROVIDER,
+            ablation_id="ab-2",
+        )
+    )
+    assert set(report.groups) == {"baseline", "memory", "memory+compaction"}
+    assert report.groups["baseline"].metrics.tasks_total == 1
+    assert "save_error" in report.config
+    assert "baseline" in report.config["save_error"], report.config["save_error"]
+    assert "对比报告" in report.config["save_error"], report.config["save_error"]
 
 
 def _run_all() -> None:

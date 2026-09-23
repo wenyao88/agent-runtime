@@ -1,9 +1,10 @@
-"""给 API 与 CLI 共用的薄服务层：run_id 生成 + 跑完落盘。
+"""给 API 与 CLI 共用的薄服务层：run_id 生成 + 跑完落盘（单组 / 消融）。
 
-两条要求：
+三条要求：
   1. `new_run_id` **带上 provider 标签** —— 从文件名就能看出这是 mock 还是真实成绩；
   2. 落盘失败**不能弄丢报告**：结果先返回给调用方，失败原因写进 `config["save_error"]`
-     （可见，不静默 —— 这是本项目反复强调的规矩）。
+     （可见，不静默 —— 这是本项目反复强调的规矩）；
+  3. 消融落盘是**四份文件**（三份组报告 + 一份对比报告）：少一份就少一个回看点。
 """
 from __future__ import annotations
 
@@ -12,9 +13,10 @@ import secrets
 from datetime import datetime
 from typing import Any
 
+from ...core.benchmark.ablation import AblationReport
 from ...core.benchmark.models import BenchmarkReport
 from .catalog import MOCK_PROVIDER
-from .store import save_report
+from .store import save_ablation, save_report
 
 _logger = logging.getLogger(__name__)
 
@@ -72,5 +74,55 @@ async def run_and_save(
         report.config["save_error"] = f"{type(e).__name__}: {e}"
         _logger.warning(
             "benchmark: 报告落盘失败（run_id=%s, dir=%s）：%s", report.run_id, runs_dir, e
+        )
+    return report
+
+
+async def run_ablation(
+    ablation_runner: Any,
+    tasks: list,
+    *,
+    runs_dir: str,
+    provider: str,
+    model: str = "",
+    judge: int = 0,
+    limit: int | None = None,
+    ablation_id: str | None = None,
+    on_group: Any = None,
+    on_progress: Any = None,
+) -> AblationReport:
+    """跑三组并落盘**四份**文件：三份组报告 + 一份对比报告。`绝不抛`于落盘失败。
+
+    落盘失败的每一份都记进 `config["save_error"]`（一条也不能少说 —— 报告没落盘时
+    API 路径下没人看得见，所以同时打日志）。
+    """
+    report = await ablation_runner.run(
+        tasks,
+        provider=provider,
+        model=model,
+        judge=judge,
+        limit=limit,
+        ablation_id=ablation_id,
+        on_group=on_group,
+        on_progress=on_progress,
+    )
+    failures: list[str] = []
+    for name, group_report in report.groups.items():
+        try:
+            save_report(group_report, runs_dir)
+        except (OSError, ValueError) as e:
+            failures.append(f"{name}: {type(e).__name__}: {e}")
+    try:
+        save_ablation(report, runs_dir)
+    except (OSError, ValueError) as e:
+        failures.append(f"对比报告: {type(e).__name__}: {e}")
+    if failures:
+        joined = "；".join(failures)
+        report.config["save_error"] = joined
+        _logger.warning(
+            "benchmark: 消融落盘失败（ablation_id=%s, dir=%s）：%s",
+            report.ablation_id,
+            runs_dir,
+            joined,
         )
     return report

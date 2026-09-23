@@ -1,13 +1,22 @@
-"""消融分组：三组自变量 + 设置覆盖 + 报告快照（纯逻辑，零第三方依赖）。
+"""消融分组：三组自变量 + 设置覆盖 + 对比报告（纯逻辑，零第三方依赖）。
 
 三组只改"记忆开关"与"摘要压缩开关"，其余（模型、任务集、代码版本、压缩阈值）完全一致；
 报告里必须带**开关快照**，否则三份报告分不清谁是谁（Phase 7 开跑前检查的第 3 条缺口）。
+
+`AblationRunner` 的 `runner_factory` 由调用方注入（`core` 不 import 任何真实 provider / 装配），
+与 Phase 6 的 `agent_factory` 同一手法。
 """
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
-from typing import Any
+import re
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from typing import Any, Callable
+
+from .metrics import summarize
+from .models import BenchmarkMetrics, BenchmarkReport
+from .runner import BenchmarkRunner
 
 
 @dataclass(frozen=True)
@@ -73,3 +82,286 @@ def group_overrides(group: AblationGroup) -> dict:
         "compaction": group.compaction,
         "session_scope": group.session_scope,
     }
+
+
+def group_config(
+    group: AblationGroup, *, provider: str, model: str = "", judge: int = 0
+) -> dict:
+    """一组跑一次用的完整 config：开关快照 + provider/model/judge。"""
+    return {
+        **group_overrides(group),
+        "provider": (provider or "").strip().lower() or "run",
+        "model": model,
+        "judge": max(0, int(judge or 0)),
+    }
+
+
+# ── 对比报告 ──
+
+KIND_ABLATION = "ablation"
+"""落盘时的类型标记：历史列表据此**跳过**对比报告（它不是一份单组报告）。"""
+
+DELTA_METRICS = (
+    "success_rate",
+    "success_rate_measured",
+    "tool_selection_accuracy",
+    "tool_argument_accuracy",
+    "avg_steps",
+    "avg_total_tokens",
+    "avg_latency_ms",
+    "provider_errors",
+    "compaction_events",
+    "summarizer_tokens",
+    "summarizer_ms",
+    "compression_ratio",
+)
+"""参与对比的指标。**包含计数与成本** —— 消融要回答的正是"记忆/压缩各花了多少"。"""
+
+ROLES = ("first", "followup", "standalone")
+"""`followup` 是记忆效应的直接观测点；`standalone` 是既不是 first 也不是 followup 的独立任务。"""
+
+_ROLE_FIELDS = ("success_rate", "success_rate_measured", "avg_steps", "avg_total_tokens")
+
+
+def _delta(baseline_value: object, group_value: object) -> dict:
+    """绝对差 + 相对差（`绝对差 / baseline`）；任一侧是 `None`（没测）或非数字 → 差值也是 `None`。
+
+    baseline 为 0 时相对差**没有定义**（不是 0）：成功率从 0% 提到 100% 的"相对提升"是无穷大，
+    记 0 会被读成"没变化"，记 `None` 才是诚实的"算不出来"。
+    """
+    low = _number(baseline_value)
+    high = _number(group_value)
+    if low is None or high is None:
+        abs_delta: float | None = None
+    else:
+        abs_delta = high - low
+    rel: float | None = None
+    if abs_delta is not None and low != 0:
+        rel = abs_delta / low
+    return {
+        "baseline": low,
+        "group": high,
+        "abs": abs_delta,
+        "rel": rel,
+    }
+
+
+def _number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _role_of(task_id: str, roles_by_id: dict[str, str]) -> str:
+    role = roles_by_id.get(task_id, "")
+    return role if role in ROLES else "standalone"
+
+
+def role_metrics(report: BenchmarkReport, roles_by_id: dict[str, str]) -> dict[str, dict]:
+    """按 `pair_role` 切分逐任务结果，给出 `tasks/success_rate/avg_steps/avg_tokens`。
+
+    口径复用 `metrics.summarize`（压缩相关字段天然是 `None`：报告里没有事件流）——
+    切分统计如果自己再算一遍，迟早和总表的口径漂移。
+    """
+    out: dict[str, dict] = {}
+    for role in ROLES:
+        verdicts = [v for v in report.verdicts if _role_of(v.task_id, roles_by_id) == role]
+        sub: BenchmarkMetrics = summarize(verdicts, [])
+        out[role] = {"tasks": len(verdicts)}
+        out[role].update({name: getattr(sub, name) for name in _ROLE_FIELDS})
+    return out
+
+
+@dataclass
+class AblationReport:
+    """三份组报告 + 相对 baseline 的差 + 按 `pair_role` 切分的指标。"""
+
+    ablation_id: str
+    baseline: str = "baseline"
+    groups: dict[str, BenchmarkReport] = field(default_factory=dict)
+    deltas: dict[str, dict] = field(default_factory=dict)
+    role_metrics: dict[str, dict] = field(default_factory=dict)
+    """组名 → `pair_role` → `{tasks, success_rate, avg_steps, avg_total_tokens}`。
+
+    放在对比报告而不是单组报告里：它是消融的观测口径，不是单轮评测的指标。"""
+
+    config: dict = field(default_factory=dict)
+    created_at: datetime = field(default_factory=datetime.now)
+
+    @property
+    def kind(self) -> str:
+        return KIND_ABLATION
+
+    def to_dict(self) -> dict:
+        return {
+            "kind": KIND_ABLATION,
+            "ablation_id": self.ablation_id,
+            "baseline": self.baseline,
+            "created_at": self.created_at.isoformat(),
+            "config": dict(self.config),
+            "groups": {name: report.to_dict() for name, report in self.groups.items()},
+            "deltas": {name: dict(metrics) for name, metrics in self.deltas.items()},
+            "role_metrics": {
+                name: {role: dict(values) for role, values in roles.items()}
+                for name, roles in self.role_metrics.items()
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AblationReport":
+        created = data.get("created_at")
+        groups = {
+            str(name): BenchmarkReport.from_dict(payload)
+            for name, payload in (data.get("groups") or {}).items()
+            if isinstance(payload, dict)
+        }
+        return cls(
+            ablation_id=str(data.get("ablation_id") or ""),
+            baseline=str(data.get("baseline") or "baseline"),
+            groups=groups,
+            deltas={
+                str(name): dict(metrics)
+                for name, metrics in (data.get("deltas") or {}).items()
+                if isinstance(metrics, dict)
+            },
+            role_metrics={
+                str(name): {
+                    str(role): dict(values)
+                    for role, values in (roles or {}).items()
+                    if isinstance(values, dict)
+                }
+                for name, roles in (data.get("role_metrics") or {}).items()
+                if isinstance(roles, dict)
+            },
+            config=dict(data.get("config") or {}),
+            created_at=datetime.fromisoformat(created) if isinstance(created, str) else datetime.now(),
+        )
+
+    @property
+    def summary(self) -> dict:
+        return {
+            "kind": KIND_ABLATION,
+            "ablation_id": self.ablation_id,
+            "created_at": self.created_at.isoformat(),
+            "config": dict(self.config),
+            "groups": {
+                name: {"run_id": report.run_id, "metrics": asdict(report.metrics)}
+                for name, report in self.groups.items()
+            },
+        }
+
+
+RunnerFactory = Callable[[AblationGroup], BenchmarkRunner]
+AblationIdFactory = Callable[[dict], str]
+
+
+def _slug(name: str) -> str:
+    """组名会进 `run_id`，而 `run_id` 会变成文件名：非 `[\\w.-]` 一律换成 `_`。
+
+    `memory+compaction` 里的 `+` 会被报告落盘的安全校验拒掉（`store._safe_name`）。
+    """
+    return re.sub(r"[^\w.-]", "_", name)
+
+
+def _default_ablation_id(config: dict) -> str:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"{stamp}-{config.get('provider') or 'run'}-ablation"
+
+
+class AblationRunner:
+    """依次跑三组，产出 `AblationReport`。
+
+    调用方给的 `runner_factory(group)` 必须返回**按该组设置装配好**的 runner ——
+    同一个 runner 复用三次就等于三组同一套配置（开跑前检查 #1 的坑）。
+    """
+
+    def __init__(
+        self,
+        runner_factory: RunnerFactory,
+        *,
+        ablation_id_factory: AblationIdFactory | None = None,
+        groups: tuple[AblationGroup, ...] = ABLATION_GROUPS,
+    ) -> None:
+        self._runner_factory = runner_factory
+        self._ablation_id_factory = ablation_id_factory or _default_ablation_id
+        self._groups = tuple(groups)
+
+    @property
+    def groups(self) -> tuple[AblationGroup, ...]:
+        return self._groups
+
+    async def run(
+        self,
+        tasks: list,
+        *,
+        provider: str,
+        model: str = "",
+        judge: int = 0,
+        limit: int | None = None,
+        on_group: Callable[[str], None] | None = None,
+        on_progress: Callable[[int, int, Any], None] | None = None,
+        ablation_id: str | None = None,
+    ) -> AblationReport:
+        cfg = {
+            "provider": (provider or "").strip().lower() or "run",
+            "model": model,
+            "judge": max(0, int(judge or 0)),
+            "groups": [group.name for group in self._groups],
+            "tasks_total": len(tasks) if limit is None else min(max(0, limit), len(tasks)),
+        }
+        final_id = ablation_id or self._ablation_id_factory(cfg)
+        baseline_name = self._groups[0].name if self._groups else "baseline"
+
+        reports: dict[str, BenchmarkReport] = {}
+        role_metrics_by_group: dict[str, dict] = {}
+        roles_by_id = {
+            task.task_id: getattr(task, "pair_role", "") for task in tasks
+        }
+        for group in self._groups:
+            if on_group is not None:
+                on_group(group.name)
+            runner = self._runner_factory(group)
+            report = await runner.run(
+                tasks,
+                config=group_config(
+                    group, provider=provider, model=model, judge=judge
+                ),
+                limit=limit,
+                on_progress=on_progress,
+                run_id=f"{final_id}-{_slug(group.name)}",
+            )
+            reports[group.name] = report
+            role_metrics_by_group[group.name] = role_metrics(report, roles_by_id)
+
+        deltas = self._deltas(reports, role_metrics_by_group, baseline_name)
+        return AblationReport(
+            ablation_id=final_id,
+            baseline=baseline_name,
+            groups=reports,
+            deltas=deltas,
+            role_metrics=role_metrics_by_group,
+            config=cfg,
+        )
+
+    @staticmethod
+    def _deltas(
+        reports: dict[str, BenchmarkReport],
+        role_metrics_by_group: dict[str, dict],
+        baseline_name: str,
+    ) -> dict[str, dict]:
+        baseline = reports.get(baseline_name)
+        out: dict[str, dict] = {}
+        for name, report in reports.items():
+            metrics = report.metrics if report is not None else BenchmarkMetrics()
+            entry: dict[str, dict] = {}
+            for metric in DELTA_METRICS:
+                base_value = getattr(baseline.metrics, metric, None) if baseline else None
+                entry[metric] = _delta(base_value, getattr(metrics, metric, None))
+            # followup 的 delta 直接给出来：读的人不该自己做减法
+            base_roles = role_metrics_by_group.get(baseline_name, {})
+            for field in _ROLE_FIELDS:
+                base_value = (base_roles.get("followup") or {}).get(field)
+                group_value = (role_metrics_by_group.get(name, {}).get("followup") or {}).get(field)
+                entry[f"role.followup.{field}"] = _delta(base_value, group_value)
+            out[name] = entry
+        return out
