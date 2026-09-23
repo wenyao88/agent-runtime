@@ -78,11 +78,19 @@ class BenchmarkRunner:
         judge: Judge | None = None,
         evaluator: Callable[[BenchmarkTask, TaskRun], TaskVerdict] = evaluate,
         run_id_factory: RunIdFactory | None = None,
+        session_scope: str = "task",
     ) -> None:
         self._agent_factory = agent_factory
         self._judge = judge
         self._evaluator = evaluator
         self._run_id_factory = run_id_factory or _default_run_id
+        # 非法值一律退回逐任务隔离：宁可隔离，也不要让任务之间互相污染
+        self._session_scope = "run" if str(session_scope).strip().lower() == "run" else "task"
+
+    @property
+    def session_scope(self) -> str:
+        """生效的会话范围（`task` / `run`）—— 调用方要把它写进报告 config。"""
+        return self._session_scope
 
     async def run(
         self,
@@ -134,14 +142,18 @@ class BenchmarkRunner:
 
     # ── 内部 ──
 
-    @staticmethod
-    def _session_id(run_id: str, task: BenchmarkTask) -> str:
-        """每条任务一个**独立会话**。
+    def _session_id(self, run_id: str, task: BenchmarkTask) -> str:
+        """逐任务隔离（`task` 范围，默认）或整轮共用一个会话（`run` 范围）。
 
-        不传 session_id 会全部落到 `default`，而 memory 的 working/short_term 是按会话组织、
+        默认不传 session_id 会全部落到 `default`，而 memory 的 working/short_term 是按会话组织、
         且 `get_memory_manager()` 是进程单例 —— 于是开着记忆时，上一条任务的记忆会被下一条召回，
         "逐任务隔离"就成了空话（审查 I1）。
+
+        `run` 范围是给消融的 memory 组用的：记忆组要考的就是"跨任务复用"，逐任务隔离会让这组
+        永远考不出差别，所以整轮共用 `bench-<run_id>`，同一轮里的上一条任务才有机会被下一条召回。
         """
+        if self._session_scope == "run":
+            return f"bench-{run_id}"
         return f"bench-{run_id}-{task.task_id}"
 
     async def _run_one(self, task: BenchmarkTask, run_id: str) -> TaskRun:

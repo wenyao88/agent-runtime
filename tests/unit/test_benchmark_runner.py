@@ -326,6 +326,33 @@ def test_an_agent_bug_is_not_blamed_on_the_provider() -> None:
     assert report.metrics.provider_errors == 0
 
 
+def test_run_scope_shares_one_session_across_tasks() -> None:
+    """消融的 memory 组要用"运行内共享会话" —— 否则记忆跨不了任务，这组就是空的。"""
+    seen: list[str] = []
+
+    class _Agent:
+        last_result = _result()
+
+        async def run_stream(self, task: str, session_id: str = ""):
+            seen.append(session_id)
+            if False:
+                yield None
+
+    asyncio.run(
+        BenchmarkRunner(
+            lambda task: _Agent(), run_id_factory=lambda cfg: "run-7", session_scope="run"
+        ).run([_task("a"), _task("b")])
+    )
+    assert seen == ["bench-run-7", "bench-run-7"]
+
+
+def test_an_unknown_session_scope_falls_back_to_per_task() -> None:
+    runner = BenchmarkRunner(lambda task: _Agent(), session_scope="nonsense")
+    assert runner.session_scope == "task"
+    assert BenchmarkRunner(lambda task: _Agent()).session_scope == "task"
+    assert BenchmarkRunner(lambda task: _Agent(), session_scope="RUN").session_scope == "run"
+
+
 def _run_all() -> None:
     failed: list[str] = []
     tests = [
