@@ -210,7 +210,8 @@ def _real_agent_factory():
         return None
     from agent_runtime.infrastructure.benchmark.catalog import real_agent_factory
 
-    return real_agent_factory(get_agent)
+    # source="benchmark"：评测轨迹要带来源标签，否则会混进聊天 trace 列表（Trace 页按来源过滤）
+    return real_agent_factory(lambda: get_agent(source="benchmark"))
 
 
 def _grouped_agent_factory():

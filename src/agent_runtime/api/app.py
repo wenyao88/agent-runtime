@@ -22,6 +22,8 @@ def create_app() -> FastAPI:
             get_skill_errors,
             get_skill_router,
             get_tool_registry,
+            get_trace_errors,
+            get_trace_store,
         )
 
         settings = get_settings()
@@ -62,6 +64,14 @@ def create_app() -> FastAPI:
         except Exception as e:  # noqa: BLE001 —— 摘要是可选能力，永不阻断启动
             app.state.context_errors = [f"context 装配异常：{type(e).__name__}: {e}"]
 
+        # trace 存储：默认内存环形，配 TRACE_STORE=sqlite 才落盘。坏文件/路径不可用只记错误 +
+        # 降级为内存，**不阻断启动**（本次重启丢历史，但服务照常可用，原因见 /api/traces 的 settings 段）。
+        try:
+            get_trace_store()
+            app.state.trace_errors = get_trace_errors()
+        except Exception as e:  # noqa: BLE001 —— 存储是可选能力，永不阻断启动
+            app.state.trace_errors = [f"trace 存储装配异常：{type(e).__name__}: {e}"]
+
         try:
             yield
         finally:
@@ -81,9 +91,11 @@ def create_app() -> FastAPI:
 
     from .routes.benchmarks import router as benchmarks_router
     from .routes.chat import router as chat_router
+    from .routes.context import router as context_router
     from .routes.memories import router as memories_router
     from .routes.skills import router as skills_router
     from .routes.tools import router as tools_router
+    from .routes.traces import router as traces_router
     from .ws.agent import router as ws_router
 
     app.include_router(chat_router)
@@ -91,6 +103,8 @@ def create_app() -> FastAPI:
     app.include_router(skills_router)
     app.include_router(memories_router)
     app.include_router(benchmarks_router)
+    app.include_router(traces_router)
+    app.include_router(context_router)
     app.include_router(ws_router)
 
     return app

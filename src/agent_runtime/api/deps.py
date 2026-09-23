@@ -8,6 +8,7 @@ from agent_runtime.core.context.manager import ContextManager
 from agent_runtime.core.memory.manager import MemoryManager
 from agent_runtime.core.skill.router import SkillRouter
 from agent_runtime.core.tool.registry import ToolRegistry
+from agent_runtime.core.trace.store import InMemoryTraceStore, TraceStore
 from agent_runtime.core.trace.tracer import Tracer
 from agent_runtime.infrastructure.context.catalog import build_context_manager
 from agent_runtime.infrastructure.memory.catalog import build_memory_manager
@@ -21,6 +22,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _skill_errors: list[str] = []
 _memory_errors: list[str] = []
 _context_errors: list[str] = []
+_trace_errors: list[str] = []
 
 
 @lru_cache
@@ -112,8 +114,59 @@ def get_skill_errors() -> list[str]:
     return list(_skill_errors)
 
 
-def get_tracer() -> Tracer:
-    return Tracer()
+@lru_cache
+def get_trace_store() -> TraceStore:
+    """进程单例 trace store（装配本体在 `infrastructure/trace/catalog.py`，**只有一处**）。
+
+    必须是单例：每次请求新建一个 store 就等于每次都在看一张空表。
+    装配失败（坏 `trace.db` / 路径不可用 / catalog 起不来）→ 降级为内存 store 并把原因记进
+    `_trace_errors`（供 lifespan 暴露），**绝不阻断启动**（与 memory / context / MCP 同一态度）。
+    """
+    _trace_errors.clear()
+    try:
+        from agent_runtime.infrastructure.trace.catalog import build_trace_store
+
+        store, errors = build_trace_store(get_settings(), str(_PROJECT_ROOT))
+    except Exception as e:  # noqa: BLE001 —— 存储是可选能力，永不阻断启动
+        _trace_errors.append(f"trace 存储装配失败，已降级为内存：{type(e).__name__}: {e}")
+        return InMemoryTraceStore()
+    _trace_errors.extend(errors)
+    return store
+
+
+def get_trace_errors() -> list[str]:
+    """trace 存储装配错误（坏文件 / 降级）。只用于可见性，绝不影响启动。"""
+    return list(_trace_errors)
+
+
+def get_tracer(source: str = "chat") -> Tracer:
+    """新建一个 tracer（一次会话一个，事件队列不能串），但**共享同一个 store**。
+
+    `source` 决定这条 trace 在 UI 里归到哪一类（`chat` / `benchmark`），必须由调用方给对：
+    评测 agent 若走默认值，轨迹会混进聊天列表里，过滤就失去意义。
+    """
+    return Tracer(store=get_trace_store(), source=source)
+
+
+_LAST_CONTEXT: ContextManager | None = None
+
+
+def _remember_context(manager: ContextManager) -> None:
+    global _LAST_CONTEXT
+    _LAST_CONTEXT = manager
+
+
+def get_last_context_manager() -> ContextManager | None:
+    """最近一次**聊天会话**用的上下文管理器；一次都没聊过则为 `None`。
+
+    `/api/context` 靠它看"当前上下文"。为什么不在路由里 `Depends(get_context_manager)`：
+    那个函数每次新建（Phase 4 起的语义，本阶段不改），现造出来的永远没有消息 ——
+    接口会回一份 "0 tokens" 的报告，看起来一切正常，比报错更误导。
+
+    天花板（README 已记）：只反映**最近一次**会话（并发多会话时看到的是最后那一次）；
+    评测 agent（`build_agent_for_settings`）不进这里，`available:false` 时原因会说明先聊一句。
+    """
+    return _LAST_CONTEXT
 
 
 def _llm_for(settings: Settings):
@@ -163,27 +216,31 @@ def build_agent_for_settings(settings: Settings) -> ReActLoop:
         planner=planner,
         skill_top_k=settings.agent_skill_top_k,
         recall_top_k=settings.memory_recall_top_k,
-        tracer=get_tracer(),
+        tracer=get_tracer("benchmark"),
         max_steps=settings.agent_max_steps,
         tool_timeout=float(settings.agent_tool_timeout_seconds),
     )
 
 
-def get_agent(llm=None) -> ReActLoop:
+def get_agent(llm=None, source: str = "chat") -> ReActLoop:
     s = get_settings()
     provider = llm or get_llm()
     # 规划器默认关闭：它多花一次 LLM 调用，且只产出"参考计划"文本（不改变控制流）
     planner = TaskPlanner(llm=provider) if s.agent_task_planning_enabled else None
+    context = get_context_manager()
+    if source == "chat":
+        # 只有聊天会话进 `/api/context`（评测 agent 的上下文进去只会让人分不清看的是谁）
+        _remember_context(context)
     return ReActLoop(
         llm=provider,
         tool_registry=get_tool_registry(),
-        context_manager=get_context_manager(),
+        context_manager=context,
         memory_manager=get_memory_manager(),
         skill_router=get_skill_router(),
         planner=planner,
         skill_top_k=s.agent_skill_top_k,
         recall_top_k=s.memory_recall_top_k,
-        tracer=get_tracer(),
+        tracer=get_tracer(source),
         max_steps=s.agent_max_steps,
         tool_timeout=float(s.agent_tool_timeout_seconds),
     )
@@ -267,7 +324,12 @@ def start_benchmark_run(
     # 真实 provider 复用 API 自己的装配（api 可以 import 自己）；mock 用离线假 agent。
     # 注意必须经 `real_agent_factory` 包一层：`get_agent(llm=None)` 的第一个形参是 llm，
     # 直接传 `get_agent` 会让 runner 的 `factory(task)` 把 task 塞进 llm —— 见 catalog 里那段注释。
-    agent_factory = None if provider == "mock" else real_agent_factory(get_agent)
+    # source="benchmark"：评测轨迹必须带自己的来源标签，否则会混进聊天 trace 列表。
+    agent_factory = (
+        None
+        if provider == "mock"
+        else real_agent_factory(lambda: get_agent(source="benchmark"))
+    )
     runner, build_errors = build_runner(
         settings, provider, agent_factory=agent_factory
     )

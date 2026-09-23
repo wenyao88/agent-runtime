@@ -59,6 +59,28 @@ def _int_stat(stats: dict, key: str) -> int:
         return 0
 
 
+def _compaction_view(result: CompactionResult | None) -> dict | None:
+    """把最近一次压缩结果压成快照里的一个小对象；没压过就是 `None`。"""
+    if result is None:
+        return None
+    return {
+        "strategy": result.strategy.value,
+        "before": result.tokens_before,
+        "after": result.tokens_after,
+        "saved_tokens": result.saved_tokens,
+        "messages_dropped": result.messages_dropped,
+        "messages_squeezed": result.messages_squeezed,
+        "summarized": result.summarized_messages,
+        "noop": result.noop,
+        "degraded_from": (
+            result.degraded_from.value if result.degraded_from is not None else None
+        ),
+        "degraded_reason": result.degraded_reason,
+        "summarizer_tokens": result.summarizer_tokens,
+        "summarizer_ms": result.summarizer_ms,
+    }
+
+
 class ContextManager:
     def __init__(
         self,
@@ -75,6 +97,10 @@ class ContextManager:
         # 以那个标记开头，按前缀认会把真实内容当摘要删掉）
         self._pinned_summary: Message | None = None
         self._messages: list[Message] = []
+        # Inspector 的"上下文"一块要看得见 token 花在哪：记忆注入是**拼进 system 文本**的，
+        # 所以在 build 时单独留一份原文，否则快照里分不出"system 本体"与"记忆"
+        self._memory_text = ""
+        self._last_compaction: CompactionResult | None = None
 
     async def build(
         self,
@@ -85,13 +111,17 @@ class ContextManager:
     ) -> None:
         self._messages = []
         self._pinned_summary = None
+        # 新一轮任务：上一轮的压缩结果不再代表"当前状态"（快照里不能继续挂着它）
+        self._last_compaction = None
+        self._memory_text = ""
         sys_text = system_prompt or "You are a helpful AI assistant with access to tools."
         if memory_entries:
             # 记忆行带 [来源 · 日期] 标注：模型必须能区分"历史记忆"与"本轮工具结果"。
             # 截断长度由构造参数决定（来自 MEMORY_INJECT_MAX_CHARS），截断必带省略号。
-            sys_text += "\n\nRelevant Memories:\n" + "\n".join(
+            self._memory_text = "\n".join(
                 format_line(e, self._memory_max_chars) for e in memory_entries
             )
+            sys_text += "\n\nRelevant Memories:\n" + self._memory_text
         self._messages.append(Message(role="system", content=sys_text))
         self._messages.append(Message(role="user", content=task))
 
@@ -111,6 +141,53 @@ class ContextManager:
 
     def should_compact(self) -> bool:
         return self.token_count() > self._budget.compaction_threshold
+
+    def snapshot(self) -> dict:
+        """当前上下文的**只读**快照：分段 token + 预算/阈值 + 最近一次压缩（Inspector 用）。
+
+        分段口径：记忆被拼进 system 文本，所以"system 本体"要从 system 里**减去**记忆那段，
+        四个段加起来必须等于 `used_tokens`（有测试钉住）。`last_compaction=None` = 这一轮还没压过
+        （`None` ≠ "压了一次但什么都没变" —— 后者是 `noop=True` 的 CompactionResult）。
+        """
+        segments: list[tuple[str, str]] = []
+        system_text = self._messages[0].content if self._messages else ""
+        if self._memory_text and self._memory_text in (system_text or ""):
+            # 连它前面那个 "\n\nRelevant Memories:\n" 一起算进记忆，否则差额会漏到 system 里
+            marker = "\n\nRelevant Memories:\n"
+            base = (system_text or "").split(marker, 1)[0]
+            segments.append(("system", base))
+            segments.append(("memory", marker + self._memory_text))
+        else:
+            segments.append(("system", system_text or ""))
+            segments.append(("memory", ""))
+
+        rest = self._messages[1:] if len(self._messages) > 1 else []
+        if rest and rest[0].role == "user":
+            segments.append(("task", rest[0].content or ""))
+            rest = rest[1:]
+        else:
+            segments.append(("task", ""))
+        segments.append(("messages", "".join(m.content or "" for m in rest)))
+
+        sections = [
+            # 空段记 0 而不是 `_count("")` 的兜底 1：分布图里"这段没内容"必须真是 0
+            {"name": name, "tokens": _count(text) if text else 0, "chars": len(text)}
+            for name, text in segments
+        ]
+        used = sum(section["tokens"] for section in sections)
+        return {
+            "budget": {
+                "model_max_tokens": self._budget.model_max_tokens,
+                "reserved_output": self._budget.reserved_output,
+                "available": self._budget.available,
+                "threshold": self._budget.compaction_threshold,
+            },
+            "used_tokens": used,
+            "ratio": used / max(1, self._budget.available),
+            "sections": sections,
+            "messages": len(self._messages),
+            "last_compaction": _compaction_view(self._last_compaction),
+        }
 
     async def compact(self, strategy: CompactionStrategy | None = None) -> CompactionResult:
         before = self.token_count()
@@ -161,6 +238,8 @@ class ContextManager:
             or result.messages_dropped
             or result.summarized_messages
         )
+        # 所有返回路径都经过这里，所以快照里的"最近一次压缩"一定是最新的那次
+        self._last_compaction = result
         return result
 
     # ── 内部策略实现 ──

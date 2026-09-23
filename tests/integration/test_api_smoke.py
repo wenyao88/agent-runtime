@@ -26,7 +26,11 @@ def _build_agent():
 
     带**真实**的 SkillRouter（从仓库 skills/ 目录加载）：这样 /api/chat 与 WS 的
     skills_used 才能被验证到"非空"的情形 —— 否则把 `skills_used=[]` 写死也照样通过。
+
+    也用 API 自己的 trace store 单例（`deps.get_trace_store()`）：另造一份 store 就永远看不到
+    真实链路写进去的东西，`/api/traces` 的冒烟会变成"断言一个空列表"。
     """
+    from agent_runtime.api import deps as deps_mod
     from agent_runtime.core.agent.react import ReActLoop
     from agent_runtime.core.context.budget import TokenBudget
     from agent_runtime.core.context.manager import ContextManager
@@ -62,7 +66,7 @@ def _build_agent():
         context_manager=ContextManager(budget=TokenBudget()),
         memory_manager=MemoryManager(working=WorkingMemory()),
         skill_router=skills,
-        tracer=Tracer(),
+        tracer=Tracer(store=deps_mod.get_trace_store(), source="chat"),
         max_steps=5,
     )
 
@@ -191,6 +195,42 @@ def test_chat_and_ws_smoke() -> None:
             assert any(
                 f["event_type"] == "tool_result" and f["data"]["success"] for f in frames
             ), frames
+
+            # ── REST: /api/traces（REST chat 与 WS 两次会话都该落进同一个 store 单例）──
+            traces_resp = client.get("/api/traces")
+            assert traces_resp.status_code == 200, traces_resp.text
+            traces = traces_resp.json()
+            assert traces["settings"]["errors"] == [], traces["settings"]
+            assert traces["settings"]["store"] in {
+                "InMemoryTraceStore",
+                "SqliteTraceStore",
+            }, traces["settings"]
+            assert traces["count"] >= 2, traces
+            assert "events" not in traces["traces"][0], "列表只给小结，不拖明细"
+            assert traces["traces"][0]["source"] == "chat", traces["traces"][0]
+
+            trace_id = traces["traces"][0]["trace_id"]
+            detail_resp = client.get(f"/api/traces/{trace_id}")
+            assert detail_resp.status_code == 200, detail_resp.text
+            detail = detail_resp.json()
+            assert detail["available"] is True and detail["reason"] == "", detail
+            assert detail["trace"]["steps"], detail
+            assert client.get(f"/api/traces/{trace_id}/events").json()["count"] >= 1
+
+            # 查不到 → 404 且原因可读（不是 500，也不是空 200）
+            missing = client.get("/api/traces/nope")
+            assert missing.status_code == 404, missing.text
+            assert "nope" in missing.json()["detail"], missing.json()
+
+            # ── REST: GET /api/context ──
+            # 这里必然 available=False：本用例用 dependency_overrides 换掉了 deps.get_agent，
+            # 而"最近一次会话的上下文"只由 deps.get_agent 记录。正面路径由
+            # tests/unit/test_context_service.py 覆盖；这里只钉住"拿不到也不 500，且给得出原因"。
+            ctx_resp = client.get("/api/context")
+            assert ctx_resp.status_code == 200, ctx_resp.text
+            ctx_body = ctx_resp.json()
+            assert ctx_body["available"] is False, ctx_body
+            assert ctx_body["reason"], ctx_body
     finally:
         ws_mod.get_agent = original_ws_get_agent
         settings.mcp_servers_file = original_mcp_file
