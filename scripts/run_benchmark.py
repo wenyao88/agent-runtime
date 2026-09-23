@@ -22,6 +22,7 @@ if str(_ROOT / "src") not in sys.path:
 _DASH = "—"
 _METRIC_ROWS = (
     ("任务数", "tasks_total", "int"),
+    ("出错任务数", "tasks_errored", "int"),
     ("成功率", "success_rate", "pct"),
     ("工具选择准确率", "tool_selection_accuracy", "pct"),
     ("工具参数准确率", "tool_argument_accuracy", "pct"),
@@ -31,6 +32,7 @@ _METRIC_ROWS = (
     ("压缩比", "compression_ratio", "pct"),
     ("错误恢复率", "error_recovery_rate", "pct"),
     ("裁判均分", "avg_judge_score", "num"),
+    ("已判分条数", "judged_tasks", "int"),
 )
 
 
@@ -69,6 +71,8 @@ def format_verdicts(verdicts: list, limit: int = 50) -> str:
             notes.append(str(verdict.warning))
         if getattr(verdict, "error", ""):
             notes.append(str(verdict.error))
+        if getattr(verdict, "extra_tool_calls", 0):
+            notes.append(f"多余工具调用 {verdict.extra_tool_calls}")
         suffix = ("  " + "；".join(notes)) if notes else ""
         lines.append(
             f"{mark} {verdict.task_id}  步数 {getattr(verdict, 'steps', 0)}"
@@ -131,7 +135,11 @@ def main(argv: list[str] | None = None) -> int:
         resolve_runs_dir,
         resolve_tasks_file,
     )
-    from agent_runtime.infrastructure.benchmark.service import new_run_id, run_and_save
+    from agent_runtime.infrastructure.benchmark.service import (
+        benchmark_config,
+        new_run_id,
+        run_and_save,
+    )
 
     settings = _load_settings()
     tasks_file = args.tasks or resolve_tasks_file(settings, str(_ROOT))
@@ -154,11 +162,11 @@ def main(argv: list[str] | None = None) -> int:
     for error in build_errors:
         print(f"⚠ {error}")
 
-    config = {
-        "provider": args.provider,
-        "model": "mock" if args.provider == MOCK_PROVIDER else str(getattr(settings, "llm_model", "")),
-        "judge": max(0, args.judge),
-    }
+    config = benchmark_config(
+        args.provider,
+        model="mock" if args.provider == MOCK_PROVIDER else str(getattr(settings, "llm_model", "")),
+        judge=args.judge,
+    )
     total = len(tasks) if args.limit is None else min(max(0, args.limit), len(tasks))
     print(f"\n跑 {total} 条任务（provider={args.provider}, judge={config['judge']}）\n" + "─" * 72)
 
@@ -185,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
     if report.config.get("save_error"):
         print(f"⚠ 报告落盘失败：{report.config['save_error']}")
     if args.provider == MOCK_PROVIDER:
-        print("注意：provider=mock 是离线夹具（合成事件 + 直接按任务声明调用工具），**不是真实成绩**。")
+        print("注意：provider=mock 是离线夹具（合成事件 + 直接按任务声明调用工具），不是真实成绩。")
     return 0
 
 

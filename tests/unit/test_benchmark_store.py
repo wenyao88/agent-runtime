@@ -122,7 +122,12 @@ def test_run_id_cannot_escape_the_directory() -> None:
     """信任边界：run_id 直接来自 API 路径参数。"""
     directory = _new_dir()
     try:
-        for bad in ("../evil", "..", ".", "a/b", "a\\b", "", "  ", "a b", "x.json"):
+        bad_names = (
+            "../evil", "..", ".", "a/b", "a\\b", "", "  ", "a b", "x.json",
+            # 审查 M2：前后空格会让"文件名 ≠ run_id"；超长名与 Windows 保留名同样必须被拒
+            " x ", "x ", " x", "CON", "nul", "LPT1", "x" * 300,
+        )
+        for bad in bad_names:
             assert load_report(bad, str(directory)) is None, bad
             try:
                 save_report(_report(bad), str(directory))
@@ -131,6 +136,7 @@ def test_run_id_cannot_escape_the_directory() -> None:
             else:
                 raise AssertionError(f"save_report 不该接受 {bad!r}")
         assert not (directory.parent / "evil.json").exists()
+        assert list(directory.glob("*.json")) == [], "坏事一条都不该落盘"
     finally:
         shutil.rmtree(directory, ignore_errors=True)
 

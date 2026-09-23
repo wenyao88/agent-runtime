@@ -27,12 +27,15 @@ class BenchmarkTask:
 
 @dataclass
 class ToolEvent:
-    """由 `TOOL_RESULT` 事件归一化出来的工具调用记录。"""
+    """由 `TOOL_RESULT` 事件归一化出来的工具调用记录。
+
+    **只有事件流独有的信息**：成功/失败、结果长度。工具名与参数从 `AgentStep.action` 取
+    （那里是带类型的 `ToolCall`，而且 `TOOL_RESULT` 事件里根本没有参数）。
+    """
 
     step: int
     tool: str
     success: bool
-    arguments: dict = field(default_factory=dict)
     result_chars: int = 0
 
 

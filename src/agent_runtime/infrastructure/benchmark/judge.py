@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -32,25 +31,42 @@ JUDGE_PROMPT = (
     "任务：\n{task}\n\n期望要点（仅供参考）：{hints}\n\nAgent 的最终答案：\n{answer}"
 )
 
-_JSON_BLOCK = re.compile(r"\{.*\}", re.DOTALL)
+_JSON_DECODER = json.JSONDecoder()
+
+
+def _json_objects(text: str) -> list[dict]:
+    """扫描文本里**所有**能独立解析成对象的 JSON 片段。
+
+    不用 `r"\\{.*\\}"`（DOTALL）那种贪婪匹配：真实输出常带多个花括号或尾巴上的散括号，
+    贪婪匹配会把整段当成一个对象而直接解析失败（审查 M1 实测：`{"a":1}{"completion":5}` → None）。
+    """
+    found: list[dict] = []
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            candidate, _ = _JSON_DECODER.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            found.append(candidate)
+    return found
 
 
 def parse_scores(raw: Any) -> dict[str, int] | None:
-    """从模型回复里抠出合法分数。返回 `None` 表示"没拿到可用分数"。"""
+    """从模型回复里抠出合法分数。返回 `None` 表示"没拿到可用分数"。
+
+    在多个候选对象里取**维度最多**的那个（模型常先输出一段说明性的 JSON）。
+    """
     if not isinstance(raw, str):
         return None
-    match = _JSON_BLOCK.search(raw)
-    if match is None:
-        return None
-    try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(data, dict):
-        return None
-    # 只挑这四个维度，再用**共享**的严格谓词校验（bool / 越界 / 非整数一律丢掉）
-    picked = {key: data[key] for key in DIMENSIONS if key in data}
-    return clean_judge_scores(picked)
+    best: dict[str, int] | None = None
+    for candidate in _json_objects(raw):
+        picked = {key: candidate[key] for key in DIMENSIONS if key in candidate}
+        scores = clean_judge_scores(picked)
+        if scores and (best is None or len(scores) > len(best)):
+            best = scores
+    return best
 
 
 def build_judge(settings: Any, *, provider_factory: Any = None) -> Judge | None:

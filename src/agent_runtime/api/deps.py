@@ -198,7 +198,11 @@ def start_benchmark_run(
         build_runner,
         real_agent_factory,
     )
-    from agent_runtime.infrastructure.benchmark.service import new_run_id, run_and_save
+    from agent_runtime.infrastructure.benchmark.service import (
+        benchmark_config,
+        new_run_id,
+        run_and_save,
+    )
 
     settings = get_settings()
     tasks_file, runs_dir = _benchmark_paths()
@@ -218,11 +222,9 @@ def start_benchmark_run(
     runner, build_errors = build_runner(
         settings, provider, agent_factory=agent_factory
     )
-    config = {
-        "provider": provider,
-        "model": "mock" if provider == "mock" else settings.llm_model,
-        "judge": max(0, int(judge)),
-    }
+    config = benchmark_config(
+        provider, model="mock" if provider == "mock" else settings.llm_model, judge=judge
+    )
     task = asyncio.create_task(
         run_and_save(
             runner,
@@ -235,4 +237,18 @@ def start_benchmark_run(
     )
     _BENCHMARK_TASKS.add(task)
     task.add_done_callback(_BENCHMARK_TASKS.discard)
+    task.add_done_callback(_log_benchmark_task)
     return {"run_id": run_id, "started": True, "errors": list(errors) + list(build_errors)}
+
+
+def _log_benchmark_task(task) -> None:
+    """后台任务无人 await，异常默认只会变成一句 "never retrieved" —— 必须自己记下来（审查 M12）。"""
+    import logging
+
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logging.getLogger(__name__).warning(
+            "benchmark: 后台评测异常：%s: %s", type(error).__name__, error
+        )

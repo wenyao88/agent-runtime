@@ -133,6 +133,23 @@ def test_all_invalid_scores_return_none() -> None:
     assert asyncio.run(judge(_task(), "答案")) is None
 
 
+def test_a_valid_score_object_after_another_object_is_recovered() -> None:
+    """回归（审查 M1）：`r"\\{.*\\}"` 贪婪匹配会把多段花括号整块当一个对象，直接解析失败。"""
+    reply = '先说明一下：{"note": "很长的说明"}{"completion": 5, "accuracy": 4}'
+    judge = build_judge(
+        _FakeSettings(judge_llm_api_key="k"), provider_factory=_factory(_FakeProvider(reply=reply))
+    )
+    assert asyncio.run(judge(_task(), "答案")) == {"completion": 5, "accuracy": 4}
+
+
+def test_a_stray_trailing_brace_does_not_break_parsing() -> None:
+    judge = build_judge(
+        _FakeSettings(judge_llm_api_key="k"),
+        provider_factory=_factory(_FakeProvider(reply='{"completion": 5} 多打了一个 }')),
+    )
+    assert asyncio.run(judge(_task(), "答案")) == {"completion": 5}
+
+
 def test_unparseable_reply_returns_none() -> None:
     judge = build_judge(
         _FakeSettings(judge_llm_api_key="k"),

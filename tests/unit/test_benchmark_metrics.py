@@ -116,10 +116,11 @@ def test_argument_accuracy_is_none_when_nothing_declares_arguments() -> None:
 
 
 def test_argument_accuracy_pools_hits_over_declared_pairs() -> None:
+    """池化 vs 逐任务均值**只有在分母不对称时才区分得开**（1/1 + 0/3 → 0.25 而非 0.5）。"""
     metrics = summarize(
-        [_verdict("a", hits=1, expected=2), _verdict("b", hits=2, expected=2)], []
+        [_verdict("a", hits=1, expected=1), _verdict("b", hits=0, expected=3)], []
     )
-    assert metrics.tool_argument_accuracy == 0.75
+    assert metrics.tool_argument_accuracy == 0.25
 
 
 # ── 均值 ──
@@ -199,16 +200,17 @@ def test_compression_survives_a_zero_before() -> None:
 
 
 def test_judge_totals_only_count_judged_tasks() -> None:
+    """逐任务均值 vs 池化**只有在分数条数不等时才区分得开**（(5,5)+1 → 3.0 而非 3.667）。"""
     metrics = summarize(
         [
-            _verdict("a", scores={"completion": 5, "accuracy": 3}),
+            _verdict("a", scores={"completion": 5, "accuracy": 5}),
             _verdict("b", scores=None),
-            _verdict("c", scores={"completion": 4, "accuracy": 4}),
+            _verdict("c", scores={"completion": 1}),
         ],
         [],
     )
     assert metrics.judged_tasks == 2
-    assert metrics.avg_judge_score == (4.0 + 4.0) / 2
+    assert metrics.avg_judge_score == 3.0
 
 
 def test_crashed_tasks_do_not_drag_the_averages_to_zero() -> None:

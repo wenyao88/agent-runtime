@@ -18,23 +18,27 @@ from ...core.benchmark.models import BenchmarkReport
 
 _SAFE_NAME = re.compile(r"^[\w.-]+$", re.UNICODE)
 _RESERVED_SUFFIXES = (".json", ".tmp")
-
-
-def repo_default_dir(project_root: str) -> str:
-    """默认落盘目录（与 `skills/` 同级；已 gitignore）。"""
-    return str(Path(project_root) / "benchmark_runs")
+_MAX_NAME_LENGTH = 120
+_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL"} | {
+    f"{prefix}{digit}" for prefix in ("COM", "LPT") for digit in range(1, 10)
+}
 
 
 def _safe_name(run_id: str) -> str | None:
-    """把 run_id 校验成"安全的文件名"，不合格返回 None。"""
-    name = str(run_id or "").strip()
-    if not name or ".." in name or name.strip(".") == "":
+    """把 run_id 校验成"安全的文件名"，不合格返回 None。
+
+    比"防越界"更严一点，都是为了让契约**完备**（审查 M2）：
+    前后空格会让"文件名 ≠ run_id"、超长名会以 `FileNotFoundError` 而不是 `ValueError` 失败、
+    `CON`/`NUL` 这类 Windows 保留名在部分环境下根本无法创建文件。
+    """
+    raw = str(run_id or "")
+    if not raw or raw != raw.strip() or ".." in raw or raw.strip(".") == "":
         return None
-    if not _SAFE_NAME.match(name):
+    if not _SAFE_NAME.match(raw) or len(raw) > _MAX_NAME_LENGTH:
         return None
-    if name.lower().endswith(_RESERVED_SUFFIXES):
+    if raw.upper() in _RESERVED_NAMES or raw.lower().endswith(_RESERVED_SUFFIXES):
         return None
-    return name
+    return raw
 
 
 def save_report(report: BenchmarkReport, directory: str) -> str:

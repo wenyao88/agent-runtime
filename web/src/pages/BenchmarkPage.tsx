@@ -11,6 +11,7 @@ type Kind = "pct" | "num" | "int";
 
 const METRIC_ROWS: { label: string; key: keyof BenchmarkMetrics; kind: Kind }[] = [
   { label: "任务数", key: "tasks_total", kind: "int" },
+  { label: "出错任务数", key: "tasks_errored", kind: "int" },
   { label: "成功率", key: "success_rate", kind: "pct" },
   { label: "工具选择准确率", key: "tool_selection_accuracy", kind: "pct" },
   { label: "工具参数准确率", key: "tool_argument_accuracy", kind: "pct" },
@@ -20,6 +21,7 @@ const METRIC_ROWS: { label: string; key: keyof BenchmarkMetrics; kind: Kind }[] 
   { label: "压缩比", key: "compression_ratio", kind: "pct" },
   { label: "错误恢复率", key: "error_recovery_rate", kind: "pct" },
   { label: "裁判均分", key: "avg_judge_score", kind: "num" },
+  { label: "已判分条数", key: "judged_tasks", kind: "int" },
 ];
 
 /** `null` 是"没测"（分母为 0），必须显示 `—` 而不是 0 —— 与 CLI 同一口径。 */
@@ -202,9 +204,11 @@ export default function BenchmarkPage() {
                 <span className="font-mono">{selected.run_id}</span> · provider{" "}
                 <span className="font-medium">{selected.config?.provider ?? "?"}</span> · 模型{" "}
                 {selected.config?.model ?? "?"} · {selected.created_at}
-                {selected.config?.provider === "mock" && (
+                {(selected.config?.synthetic === true ||
+                  selected.config?.provider === "mock") && (
                   <div className="mt-1 rounded bg-amber-50 p-1 text-amber-700">
-                    mock 是离线夹具（合成事件、按任务声明直接调用工具），**不是真实成绩**
+                    mock 是离线夹具（合成事件、按任务声明直接调用工具），不是真实成绩
+                    {selected.config?.synthetic !== true && "（旧报告没有 synthetic 标记）"}
                   </div>
                 )}
               </div>

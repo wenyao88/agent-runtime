@@ -26,6 +26,7 @@ export type ChatMessage = {
 
 export type BenchmarkMetrics = {
   tasks_total: number;
+  tasks_errored: number;
   success_rate: number | null;
   tool_selection_accuracy: number | null;
   tool_argument_accuracy: number | null;

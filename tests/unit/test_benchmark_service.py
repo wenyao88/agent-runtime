@@ -60,8 +60,14 @@ def _tasks(limit: int):
 
 def test_new_run_id_embeds_the_provider_and_the_time() -> None:
     run_id = new_run_id("mock", now=datetime(2026, 9, 21, 15, 30, 0))
-    assert run_id == "20260921-153000-mock"
-    assert new_run_id("", now=datetime(2026, 9, 21, 15, 30, 0)).endswith("-run")
+    assert run_id.startswith("20260921-153000-mock-")
+    assert len(run_id.rsplit("-", 1)[-1]) == 4, "必须有随机后缀（审查 M3：同秒撞名会静默覆盖报告）"
+    assert new_run_id("", now=datetime(2026, 9, 21, 15, 30, 0)).startswith("20260921-153000-run-")
+
+
+def test_two_runs_in_the_same_second_do_not_collide() -> None:
+    stamps = {new_run_id("mock", now=datetime(2026, 9, 21, 15, 30, 0)) for _ in range(50)}
+    assert len(stamps) > 40, f"同一秒内应当几乎不撞名，实际只得到 {len(stamps)} 个不同 id"
 
 
 def test_run_and_save_writes_a_loadable_report() -> None:
