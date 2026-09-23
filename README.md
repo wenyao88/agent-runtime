@@ -141,9 +141,9 @@ tags: [code]
 
 | 层 | 存储 | 范围 | 检索方式 |
 |---|---|---|---|
-| Working | 进程内 | 单次任务 | 子串匹配（已有） |
+| Working | 进程内 | **进程生命周期**（不是单次任务：manager 是单例、从不清理，可能跨会话命中） | 子串匹配（已有） |
 | Short-term | Redis List + TTL | **单会话**（`session_id`） | 最近 N 条 + 子串过滤 |
-| Long-term | PostgreSQL + pgvector | 跨会话 | **余弦距离语义检索** |
+| Long-term | PostgreSQL + pgvector | 跨会话 | 带 `query` → 余弦距离语义检索；**不带 `query` → 按时间倒序取最近 N 条** |
 
 召回顺序 `working → short_term → long_term`，够 `MEMORY_RECALL_TOP_K` 条即**短路**（不查更慢的持久层）。
 
@@ -188,6 +188,9 @@ Relevant Memories:
 | `consolidate` | 单次 LLM 摘要，**不保证无损**；失败降级为原文截断 | 多轮摘要 + 保留原文引用链 |
 | 短时 `clear()` | 只删**单会话**（`DELETE /api/memories` 清的是默认会话）；long_term 是全表清空 | 全量清空用 `SCAN`；按会话删需加列 |
 | 三层写入 | **无事务**，各自 best-effort | 出站队列 / 补偿任务 |
+| 长期记忆的排序 | 检索出的 k 条在注入前会被 `sort_entries` 按来源+时间**重排**（spec §4.2 的固定顺序），故"最终注入顺序"不等于 pgvector 的相似度顺序；相似度只决定**取哪 k 条** | 要严格按相似度呈现，需在注入时保留并按其排序 |
+| `session_id` 列 | 长期记忆**只写不按其过滤**（定位是跨会话语义检索），列本身用于排查与后续按会话清理 | 需要时在 `query()` 里加过滤条件 |
+| Working 的 scope | 进程级累积、从不清理（见上表），可能跨会话命中 | 按会话隔离，或加清理/淘汰策略 |
 
 ## Demo 1：GitHub 仓库分析
 

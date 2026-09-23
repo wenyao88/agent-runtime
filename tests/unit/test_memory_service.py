@@ -168,14 +168,16 @@ def test_clear_reports_failure_per_layer_without_raising() -> None:
     assert body["long_term"]["ok"] is True, "一层失败不得影响另一层"
 
 
-def test_working_layer_is_never_exposed_or_cleared() -> None:
-    """工作记忆是进程内临时状态，不该被 API 查询/清空语义牵扯进来。"""
+def test_working_entries_appear_in_all_but_api_has_no_working_layer() -> None:
+    """名字与断言一致：`layer=all` 走 `recall` 级联，**工作记忆本来就会命中**（Phase 3 既有语义）；
+
+    但 API 既不暴露也不清空"工作层"—— 它是进程内状态，不是可运维的持久层。
+    """
     manager = MemoryManager(working=WorkingMemory())
     _run(manager.store(MemoryEntry(content="进程内")))
     listed = _run(list_memories(manager, query="进程内", top_k=3, layer="all"))
-    assert listed["enabled"] == {"short_term": False, "long_term": False}
-    short_circuit = [m for m in listed["memories"] if m["source"] == SOURCE_WORKING]
-    assert short_circuit, "all 走 recall，工作记忆本就会命中（这是既有级联语义）"
+    assert listed["enabled"] == {"short_term": False, "long_term": False}, "工作层不出现在 enabled 里"
+    assert [m["source"] for m in listed["memories"]] == [SOURCE_WORKING]
 
 
 def test_list_all_surfaces_manager_side_failures() -> None:

@@ -1,4 +1,7 @@
-FROM python:3.12-slim
+# 基础镜像可覆盖：`docker build --build-arg PYTHON_IMAGE=...`（或在 compose 的 build.args 里指定）。
+# 本机实测中 `python:3.12-slim` 拉不下来（网络/镜像源），参数化后可直接用本地已有镜像，不必改代码。
+ARG PYTHON_IMAGE=python:3.12-slim
+FROM ${PYTHON_IMAGE}
 
 WORKDIR /app
 
