@@ -47,17 +47,21 @@ def _tc(call_id: str, arguments: str, usage: TokenUsage | None = None) -> LLMRes
     )
 
 
-def _setup(script: list[LLMResponse], *, max_steps: int = 15, memory_manager=None, **agent_kw):
+def _setup(
+    script: list[LLMResponse], *, max_steps: int = 15, memory_manager=None,
+    context_manager: ContextManager | None = None, **agent_kw
+):
     """真实组件组装：MockLLM + FileReaderTool + 真 ContextManager/MemoryManager/Tracer。
 
     `**agent_kw` 透传给 ReActLoop（Phase 3 的 skill_router / planner / skill_top_k，
-    Phase 4 的 session_id 走这里）；`memory_manager` 可显式覆盖（Phase 4 会话标识测试用）。
+    Phase 4 的 session_id 走这里）；`memory_manager` 可显式覆盖（Phase 4 会话标识测试用）；
+    `context_manager` 可显式覆盖（Phase 5 压缩测试要自带预算与摘要器）。
     """
     root = _new_root()
     (Path(root) / "a.txt").write_text("hello react", encoding="utf-8")
     registry = ToolRegistry()
     registry.register(FileReaderTool(root=root))
-    ctx = ContextManager(budget=TokenBudget())
+    ctx = context_manager or ContextManager(budget=TokenBudget())
     memory = memory_manager or MemoryManager(working=WorkingMemory())
     tracer = Tracer()
     agent = ReActLoop(
@@ -563,6 +567,64 @@ async def test_recall_top_k_defaults_to_three() -> None:
         assert layer.queries[0].top_k == 3
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+# ── Phase 5：压缩事件的降级可见性 ──
+#
+# `compact()` 现在会产出"想摘要没做成"这类信息。只写进 `CompactionResult` 而不发到事件里，
+# 调用方（CLI / WS / 前端）就完全看不到 —— "机制做了、展示层藏起来"在本项目已发生三次。
+
+
+def _tiny_ctx(summarizer=None) -> ContextManager:
+    """预算小到必然触发压缩：available=1 → 阈值 0，每个工具结果之后都会压一次。"""
+    return ContextManager(
+        budget=TokenBudget(model_max_tokens=1, reserved_output=0, safety_margin=1.0),
+        keep_recent=1,
+        summarizer=summarizer,
+    )
+
+
+async def test_compaction_event_reports_a_degraded_summary() -> None:
+    agent, ctx, memory, tracer, root = _setup(
+        [_tc("c1", '{"path": "big.txt"}'), LLMResponse(content="最终答案")],
+        context_manager=_tiny_ctx(),
+    )
+    try:
+        (Path(root) / "big.txt").write_text("Z" * 4000, encoding="utf-8")
+        events = [ev async for ev in agent.run_stream("读大文件")]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    compaction = [e for e in events if e.event_type == AgentEventType.COMPACTION]
+    assert compaction, "预算这么小必须触发压缩"
+    data = compaction[0].data
+    assert data["strategy"] == "truncate"
+    assert data["degraded_from"] == "summarize", "想摘要却没有摘要器，必须如实标出来"
+    assert "未配置" in data["reason"]
+    assert data["summarized"] == 0
+
+
+async def test_compaction_event_reports_a_successful_summary() -> None:
+    async def summarizer(text: str) -> str:
+        return "早期经过：读了一个大文件"
+
+    agent, ctx, memory, tracer, root = _setup(
+        [_tc("c1", '{"path": "big.txt"}'), LLMResponse(content="最终答案")],
+        context_manager=_tiny_ctx(summarizer),
+    )
+    try:
+        (Path(root) / "big.txt").write_text("Z" * 4000, encoding="utf-8")
+        events = [ev async for ev in agent.run_stream("读大文件")]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    compaction = [e for e in events if e.event_type == AgentEventType.COMPACTION]
+    assert compaction
+    data = compaction[0].data
+    assert data["strategy"] == "summarize"
+    assert data["degraded_from"] is None
+    assert data["reason"] == ""
+    assert data["summarized"] >= 1
 
 
 if __name__ == "__main__":

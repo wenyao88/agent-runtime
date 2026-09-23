@@ -212,7 +212,14 @@ class ReActLoop:
                                                       cr.strategy.value)
                     yield AgentEvent(AgentEventType.COMPACTION, {
                         "before": cr.tokens_before, "after": cr.tokens_after,
-                        "strategy": cr.strategy.value})
+                        "strategy": cr.strategy.value,
+                        # 降级原因与摘要条数必须发出去：只写进 CompactionResult 的话，
+                        # CLI / WS / 前端完全看不到"想摘要却没做成"（展示层藏机制是老坑）。
+                        "degraded_from": (
+                            cr.degraded_from.value if cr.degraded_from else None
+                        ),
+                        "reason": cr.degraded_reason,
+                        "summarized": cr.summarized_messages})
 
         warnings: list[str] = []
         if tool_calls_total and tool_calls_failed == tool_calls_total:
