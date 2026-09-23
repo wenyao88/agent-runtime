@@ -28,6 +28,8 @@ export type BenchmarkMetrics = {
   tasks_total: number;
   tasks_errored: number;
   success_rate: number | null;
+  success_rate_measured: number | null;
+  provider_errors: number;
   tool_selection_accuracy: number | null;
   tool_argument_accuracy: number | null;
   avg_steps: number | null;

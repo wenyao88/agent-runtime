@@ -287,6 +287,30 @@ python scripts/run_benchmark.py --provider mock --ablation --limit 3   # 离线�
 对比报告只按 `pair_role` 切分**逐任务判分**（成功率/步数/token），压缩与摘要成本只能看整组合计 ——
 事件流不进单组报告，所以没法按角色拆分。
 
+### 断点续跑：几小时的评测断了不用从头来
+
+```bash
+python scripts/run_benchmark.py --provider real --limit 100            # 第一轮（中途断了也没关系）
+python scripts/run_benchmark.py --provider real --limit 100 --resume    # 接着跑：已成功的条目直接跳过
+python scripts/run_benchmark.py --provider real --ablation --resume     # 消融三组各认各的进度
+python scripts/run_benchmark.py --provider real --ablation --ablation-id 20260923-120000-real-ablation-ab12
+```
+
+**每条任务判分后立刻追加一行**到 `benchmark_runs/<run_id>.progress.jsonl`（写完就 flush，断电最多丢最后一行）。
+消融三组各有**自己**的 run_id 与进度文件（`<ablation_id>-<组名>.progress.jsonl`），且**每组跑完立刻落盘该组报告** ——
+第三组崩了，前两组的报告照样在磁盘上。
+
+- **跳过的是"已成功"的条目**：失败/超时/限流的条目下次会**重试**（限流正是要重试的东西）。
+- **续跑必须配置相同**：进度文件首行存了配置指纹（provider/模型/judge/limit/条数/任务集 id 集合/分组开关），
+  对不上就**拒绝续跑**并说清原因 —— 换模型或换 `--limit` 之后接着跑，等于把两套配置的指标混成一份报告。
+- **跑完的不再续**：最终报告已在磁盘上时，`--resume` 会开新一轮（不会改坏已完成的那份）。
+- **来源可查**：从进度文件捡回来的判分带 `skipped: true`，报告 `config.resumed` 记录条数。
+- 进度文件不是报告：历史列表只扫 `*.json`，它不会变成一条幽灵记录。
+
+天花板：进度写入是**尽力而为但可见**的（目录只读/磁盘满时报告照样跑完，原因写进 `config.progress_error` 并打日志）；
+进度记录只存"重算指标所需的最小集"（判分 + 工具事件 + 压缩事件），不存答案正文，
+所以续跑不能重放答案、也不能补跑裁判；任务集只按 **id 集合**判断是否变过，改了某条任务的文本不会被发现。
+
 ## 输出可信度（防幻觉）
 
 工具型 Agent 最大的失真来源不是工具挂了，而是**工具挂了模型却照写报告**。本项目在三个层面兜底：

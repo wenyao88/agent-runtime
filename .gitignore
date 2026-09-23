@@ -24,6 +24,8 @@ web/dist/
 
 # Benchmark reports (local artifacts)
 benchmark_runs/
+# 断点续跑的进度文件：跟着报告目录走，但万一被写到别处（--out .）也不该进版本库
+*.progress.jsonl
 
 # IDE
 .idea/

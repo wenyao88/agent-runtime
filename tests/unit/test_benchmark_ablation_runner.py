@@ -57,6 +57,10 @@ def _verdict(task_id: str, success: bool, *, steps: int = 2, tokens: int = 100) 
     return TaskVerdict(task_id=task_id, success=success, steps=steps, total_tokens=tokens)
 
 
+def _run_for(task_id: str) -> TaskRun:
+    return TaskRun(task=BenchmarkTask(task_id=task_id, task="做事"))
+
+
 def _factory_runner(outcomes: dict[str, list[TaskVerdict]], built: list[str]):
     """按组名建 runner，并记录装配顺序（"每组各装一次"是硬要求）。"""
 
@@ -65,9 +69,17 @@ def _factory_runner(outcomes: dict[str, list[TaskVerdict]], built: list[str]):
             super().__init__({})
             self._group = group
 
-        async def run(self, tasks, *, config=None, limit=None, on_progress=None, run_id=None):
-            self.calls.append({"config": dict(config or {}), "limit": limit, "run_id": run_id})
+        async def run(
+            self, tasks, *, config=None, limit=None, on_progress=None, run_id=None, done=None,
+            on_verdict=None,
+        ):
+            self.calls.append(
+                {"config": dict(config or {}), "limit": limit, "run_id": run_id, "done": done}
+            )
             verdicts = outcomes[self._group.name]
+            for verdict in verdicts:
+                if on_verdict is not None:
+                    on_verdict(_run_for(verdict.task_id), verdict)
             if on_progress is not None:
                 for index, verdict in enumerate(verdicts, start=1):
                     on_progress(index, len(tasks), verdict)
@@ -238,7 +250,10 @@ def test_limit_is_forwarded_to_every_group() -> None:
 
     def factory(group: AblationGroup):
         class _R:
-            async def run(self, tasks, *, config=None, limit=None, on_progress=None, run_id=None):
+            async def run(
+                self, tasks, *, config=None, limit=None, on_progress=None, run_id=None,
+                done=None, on_verdict=None,
+            ):
                 seen.append(limit)
                 return BenchmarkReport(run_id=run_id or "r", metrics=_metrics_of([]))
 
@@ -270,6 +285,70 @@ def test_report_round_trips_through_dict() -> None:
     assert again.created_at == report.created_at
     assert again.groups["memory"].metrics.success_rate == 1.0
     assert again.deltas == report.deltas
+
+
+def test_done_for_group_is_passed_to_each_group_runner() -> None:
+    """续跑：三组各自的"已成功条目"要分别交给对应组的 runner（各写各的进度文件）。"""
+    built: list[str] = []
+    factory = _factory_runner(
+        {name: [_verdict("gh-001", True)] for name in ("baseline", "memory", "memory+compaction")},
+        built,
+    )
+    runners = {}
+
+    def factory_with_tracking(group: AblationGroup):
+        runner = factory(group)
+        runners[group.name] = runner
+        return runner
+
+    seen_groups: list[str] = []
+
+    def done_for_group(group: AblationGroup) -> dict:
+        seen_groups.append(group.name)
+        return {"gh-001": ("已存的 run", "已存的 verdict")}
+
+    asyncio.run(
+        AblationRunner(factory_with_tracking).run(
+            _tasks(), provider="mock", ablation_id="ab-1", done_for_group=done_for_group
+        )
+    )
+    assert seen_groups == ["baseline", "memory", "memory+compaction"]
+    for name, runner in runners.items():
+        assert runner.calls[0]["done"] == {"gh-001": ("已存的 run", "已存的 verdict")}, name
+
+
+def test_each_group_report_is_handed_over_as_soon_as_it_finishes() -> None:
+    """`on_group_done` 在**每组跑完立刻**回调：三组要跑几小时，不能等三组全完才落盘。"""
+    built: list[str] = []
+    factory = _factory_runner(
+        {name: [_verdict("gh-001", True)] for name in ("baseline", "memory", "memory+compaction")},
+        built,
+    )
+    order: list[str] = []
+
+    def on_group_done(name: str, report) -> None:
+        order.append(f"{name}:{report.run_id}")
+
+    report = asyncio.run(
+        AblationRunner(factory).run(
+            _tasks(), provider="mock", ablation_id="ab-1", on_group_done=on_group_done
+        )
+    )
+    assert order == [
+        "baseline:ab-1-baseline",
+        "memory:ab-1-memory",
+        "memory+compaction:ab-1-memory_compaction",
+    ]
+    assert order[-1].split(":")[0] == list(report.groups)[-1]
+
+
+def test_the_default_ablation_id_does_not_collide_within_the_same_second() -> None:
+    """回归（审查 I-1）：默认 id 只有秒级精度 → 同一秒两次会把四份报告静默覆盖。"""
+    from agent_runtime.core.benchmark.ablation import _default_ablation_id
+
+    ids = {_default_ablation_id({"provider": "mock"}) for _ in range(10)}
+    assert len(ids) > 5, f"同一秒内应当几乎不撞名，实际只得到 {len(ids)} 个不同 id"
+    assert all("-mock-" in value for value in ids)
 
 
 def test_group_config_merges_the_switch_snapshot() -> None:

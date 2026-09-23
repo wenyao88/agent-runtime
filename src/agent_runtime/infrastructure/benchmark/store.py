@@ -27,12 +27,15 @@ _RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL"} | {
 }
 
 
-def _safe_name(run_id: str) -> str | None:
+def safe_name(run_id: str) -> str | None:
     """把 run_id 校验成"安全的文件名"，不合格返回 None。
 
     比"防越界"更严一点，都是为了让契约**完备**（审查 M2）：
     前后空格会让"文件名 ≠ run_id"、超长名会以 `FileNotFoundError` 而不是 `ValueError` 失败、
     `CON`/`NUL` 这类 Windows 保留名在部分环境下根本无法创建文件。
+
+    **公开**：报告与进度文件是同一类信任边界，必须用同一份判据（各写一份迟早出现"报告挡住了、
+    进度文件没挡住"的缺口）。
     """
     raw = str(run_id or "")
     if not raw or raw != raw.strip() or ".." in raw or raw.strip(".") == "":
@@ -42,6 +45,14 @@ def _safe_name(run_id: str) -> str | None:
     if raw.upper() in _RESERVED_NAMES or raw.lower().endswith(_RESERVED_SUFFIXES):
         return None
     return raw
+
+
+def require_safe_name(run_id: str, what: str) -> str:
+    """校验不通过就抛 `ValueError`（静默写到别处比报错危险得多）。"""
+    name = safe_name(run_id)
+    if name is None:
+        raise ValueError(f"{what} 不能用作文件名：{run_id!r}")
+    return name
 
 
 def _write_json(name: str, payload: dict, directory: str) -> str:
@@ -62,17 +73,13 @@ def save_report(report: BenchmarkReport, directory: str) -> str:
 
     `run_id` 不合格时抛 `ValueError` —— 静默写到别处比报错危险得多。
     """
-    name = _safe_name(report.run_id)
-    if name is None:
-        raise ValueError(f"run_id 不能用作文件名：{report.run_id!r}")
+    name = require_safe_name(report.run_id, "run_id")
     return _write_json(name, report.to_dict(), directory)
 
 
 def save_ablation(report: AblationReport, directory: str) -> str:
     """原子写入对比报告（与单组报告同目录，靠 `kind` 字段区分）。"""
-    name = _safe_name(report.ablation_id)
-    if name is None:
-        raise ValueError(f"ablation_id 不能用作文件名：{report.ablation_id!r}")
+    name = require_safe_name(report.ablation_id, "ablation_id")
     return _write_json(name, report.to_dict(), directory)
 
 
@@ -91,7 +98,7 @@ def load_report(run_id: str, directory: str) -> BenchmarkReport | None:
     对比报告按类型拒掉：`BenchmarkReport.from_dict` 会在它身上"成功"解析出一份
     `run_id=""` 的空报告，那会变成历史列表里的幽灵条目。
     """
-    name = _safe_name(run_id)
+    name = safe_name(run_id)
     if name is None:
         return None
     data = _read_json(name, directory)

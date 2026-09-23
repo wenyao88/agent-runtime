@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import re
+import secrets
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Callable
@@ -126,8 +127,10 @@ _ROLE_FIELDS = ("success_rate", "success_rate_measured", "avg_steps", "avg_total
 def _delta(baseline_value: object, group_value: object) -> dict:
     """绝对差 + 相对差（`绝对差 / baseline`）；任一侧是 `None`（没测）或非数字 → 差值也是 `None`。
 
-    baseline 为 0 时相对差**没有定义**（不是 0）：成功率从 0% 提到 100% 的"相对提升"是无穷大，
+    `baseline == 0` 时相对差**没有定义**（不是 0）：成功率从 0% 提到 100% 的"相对提升"是无穷大，
     记 0 会被读成"没变化"，记 `None` 才是诚实的"算不出来"。
+    `baseline < 0` 时同样给 `None`：**压缩比可以为负**（`after > before`，上下文变大），
+    用负基线算相对差会让"变好"显示成 -200%（审查 M-4 实测）。
     """
     low = _number(baseline_value)
     high = _number(group_value)
@@ -136,7 +139,7 @@ def _delta(baseline_value: object, group_value: object) -> dict:
     else:
         abs_delta = high - low
     rel: float | None = None
-    if abs_delta is not None and low != 0:
+    if abs_delta is not None and low > 0:
         rel = abs_delta / low
     return {
         "baseline": low,
@@ -181,7 +184,7 @@ class AblationReport:
     groups: dict[str, BenchmarkReport] = field(default_factory=dict)
     deltas: dict[str, dict] = field(default_factory=dict)
     role_metrics: dict[str, dict] = field(default_factory=dict)
-    """组名 → `pair_role` → `{tasks, success_rate, avg_steps, avg_total_tokens}`。
+    """组名 → `pair_role` → `{tasks, success_rate, success_rate_measured, avg_steps, avg_total_tokens}`。
 
     放在对比报告而不是单组报告里：它是消融的观测口径，不是单轮评测的指标。"""
 
@@ -263,9 +266,23 @@ def _slug(name: str) -> str:
     return re.sub(r"[^\w.-]", "_", name)
 
 
+def group_run_id(ablation_id: str, group: AblationGroup) -> str:
+    """某一组在这一轮消融里的 `run_id`（`<ablation_id>-<slug(组名)>`）。
+
+    **唯一出处**：`AblationRunner` 与进度文件都用它 —— 两处各写一遍迟早漂移
+    （那就变成"报告写这里、进度写那里"，续跑直接失效）。
+    """
+    return f"{ablation_id}-{_slug(group.name)}"
+
+
 def _default_ablation_id(config: dict) -> str:
+    """`<时间戳>-<provider>-ablation-<4 位随机>`。
+
+    随机后缀与 `service.new_run_id` 同理：时间戳只有秒级精度，同一秒跑两次会**静默覆盖**四份报告
+    （审查 I-1 实测复现）。
+    """
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return f"{stamp}-{config.get('provider') or 'run'}-ablation"
+    return f"{stamp}-{config.get('provider') or 'run'}-ablation-{secrets.token_hex(2)}"
 
 
 class AblationRunner:
@@ -299,9 +316,21 @@ class AblationRunner:
         judge: int = 0,
         limit: int | None = None,
         on_group: Callable[[str], None] | None = None,
+        on_group_done: Callable[[str, BenchmarkReport], None] | None = None,
         on_progress: Callable[[int, int, Any], None] | None = None,
         ablation_id: str | None = None,
+        done_for_group: Callable[[AblationGroup], dict] | None = None,
+        on_verdict_for_group: Callable[[AblationGroup], Callable | None] | None = None,
     ) -> AblationReport:
+        """依次跑三组，产出 `AblationReport`。
+
+        * `on_group(name)`：该组**开跑前**回调（打印分隔标题）；
+        * `on_group_done(name, report)`：该组**一跑完立刻**回调 —— 三组要跑几小时，落盘不能等三组全完
+          （否则第一组跑完的东西也会随第二组的崩溃一起丢掉）；
+        * `done_for_group(group)`：给该组返回"上一轮已成功的条目"，用于续跑（不调用 LLM）；
+        * `on_verdict_for_group(group)`：给该组返回"每条跑完就回调"的函数（追加该组的进度文件）；
+        * `on_progress`：原样转发给当组 runner。
+        """
         cfg = {
             "provider": (provider or "").strip().lower() or "run",
             "model": model,
@@ -328,10 +357,19 @@ class AblationRunner:
                 ),
                 limit=limit,
                 on_progress=on_progress,
-                run_id=f"{final_id}-{_slug(group.name)}",
+                run_id=group_run_id(final_id, group),
+                done=done_for_group(group) if done_for_group is not None else None,
+                on_verdict=(
+                    on_verdict_for_group(group)
+                    if on_verdict_for_group is not None
+                    else None
+                ),
             )
             reports[group.name] = report
             role_metrics_by_group[group.name] = role_metrics(report, roles_by_id)
+            if on_group_done is not None:
+                # 立刻交出去落盘：这一组已经花掉的时间不能因为下一组崩掉而白费
+                on_group_done(group.name, report)
 
         deltas = self._deltas(reports, role_metrics_by_group, baseline_name)
         return AblationReport(

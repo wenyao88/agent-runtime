@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from agent_runtime.core.agent.base import AgentResult, AgentStep, FinalAnswer, ToolCall  # noqa: E402
 from agent_runtime.core.agent.events import AgentEvent, AgentEventType  # noqa: E402
-from agent_runtime.core.benchmark.models import BenchmarkTask  # noqa: E402
+from agent_runtime.core.benchmark.models import BenchmarkTask, TaskRun, TaskVerdict  # noqa: E402
 from agent_runtime.core.benchmark.runner import BenchmarkRunner  # noqa: E402
 from agent_runtime.core.llm.types import TokenUsage  # noqa: E402
 
@@ -136,6 +136,84 @@ def test_compaction_events_carry_the_summarizer_cost() -> None:
     assert report.metrics.compaction_events_by_strategy == {"truncate": 1}
     assert report.metrics.summarizer_tokens == 210
     assert report.metrics.summarizer_ms == 120
+
+
+def test_completed_tasks_are_skipped_and_reused() -> None:
+    """续跑：`done` 里的任务**不调用 agent**，直接用已存结果补齐报告。
+
+    这是"断点续跑"的核心语义：省下的就是那几次真实 LLM 调用。
+    """
+    tasks = [_task("a"), _task("b")]
+    built: list[str] = []
+    mapping = {"a": _FakeAgent(_events(), _result()), "b": _FakeAgent(_events(), _result())}
+
+    def factory(task: BenchmarkTask):
+        built.append(task.task_id)
+        return mapping[task.task_id]
+
+    stored_run = TaskRun(task=tasks[0])
+    stored_verdict = TaskVerdict(task_id="a", success=True, steps=9, total_tokens=999)
+    report = asyncio.run(
+        BenchmarkRunner(factory, run_id_factory=lambda cfg: "r").run(
+            tasks, done={"a": (stored_run, stored_verdict)}
+        )
+    )
+    assert built == ["b"], "已完成的 'a' 不该再造 agent"
+    first, second = report.verdicts
+    assert first.task_id == "a" and first.steps == 9 and first.total_tokens == 999
+    assert first.skipped is True, "捡回来的判分必须自报来源"
+    assert second.skipped is False
+    assert report.metrics.tasks_total == 2, "报告仍然是完整的一份"
+    assert report.metrics.avg_steps is not None
+
+
+def test_failed_tasks_are_not_reused_so_they_get_retried() -> None:
+    """失败/出错的条目不进 `done`（由调用方保证）：下次必须重跑，否则限流就把成绩钉死了。"""
+    tasks = [_task("a")]
+    built: list[str] = []
+    mapping = {"a": _FakeAgent(_events(), _result())}
+    asyncio.run(
+        BenchmarkRunner(_factory(mapping, built), run_id_factory=lambda cfg: "r").run(
+            tasks, done={}
+        )
+    )
+    assert built == ["a"]
+
+
+def test_every_finished_task_is_reported_to_the_callback() -> None:
+    """每条判分完成就立刻回调（调用方据此追加进度文件）——成功与失败都要回调。"""
+    tasks = [_task("a"), _task("b")]
+    seen: list[tuple[str, bool]] = []
+
+    class _Boom:
+        last_result = None
+
+        async def run_stream(self, task: str, session_id: str = ""):
+            raise RuntimeError("boom")
+            yield None
+
+    mapping = {"a": _FakeAgent(_events(), _result()), "b": _Boom()}
+    asyncio.run(
+        BenchmarkRunner(lambda task: mapping[task.task_id], run_id_factory=lambda cfg: "r").run(
+            tasks,
+            on_verdict=lambda run, verdict: seen.append((verdict.task_id, verdict.success)),
+        )
+    )
+    assert seen == [("a", True), ("b", False)]
+
+
+def test_skipped_tasks_are_not_reported_to_the_callback() -> None:
+    """已完成的条目不该再往进度文件里追加一遍（重复行会让计数看着像跑了两遍）。"""
+    tasks = [_task("a")]
+    seen: list[str] = []
+    asyncio.run(
+        BenchmarkRunner(lambda task: _FakeAgent(_events(), _result()), run_id_factory=lambda cfg: "r").run(
+            tasks,
+            done={"a": (TaskRun(task=tasks[0]), TaskVerdict(task_id="a", success=True))},
+            on_verdict=lambda run, verdict: seen.append(verdict.task_id),
+        )
+    )
+    assert seen == []
 
 
 def test_limit_caps_the_number_of_tasks() -> None:

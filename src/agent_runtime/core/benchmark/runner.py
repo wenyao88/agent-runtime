@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -100,11 +101,18 @@ class BenchmarkRunner:
         limit: int | None = None,
         on_progress: Callable[[int, int, TaskVerdict], None] | None = None,
         run_id: str | None = None,
+        done: dict[str, tuple[TaskRun, TaskVerdict]] | None = None,
+        on_verdict: Callable[[TaskRun, TaskVerdict], None] | None = None,
     ) -> BenchmarkReport:
         """跑一批任务并汇总。
 
         `config["judge"] = N` 时只对**前 N 条**采样裁判（确定性，便于复现）。
         `run_id` 给定时就用它（API 需要先返回 run_id 再后台跑）。
+
+        `done` = 上一轮**已经成功**的条目（`{task_id: (run, verdict)}`）：命中的任务**不调用 agent**，
+        直接用已存结果补齐报告，`verdict.skipped` 标为 `True`。这是断点续跑的落点 ——
+        100 条 × 3 组要跑几小时，省下的就是这些真实调用（失败的条目不进 `done`，下次重试）。
+        `on_verdict` 在**每条真正跑完的任务**判分后立刻回调（调用方据此追加进度文件；跳过的条目不回调）。
         """
         selected = list(tasks)
         if limit is not None:
@@ -115,19 +123,27 @@ class BenchmarkRunner:
             cfg["limit"] = limit
         judge_limit = max(0, _as_int(cfg.get("judge")))
         final_run_id = run_id or self._run_id_factory(cfg)
+        reused = dict(done or {})
 
         runs: list[TaskRun] = []
         verdicts: list[TaskVerdict] = []
         for index, task in enumerate(selected):
-            run = await self._run_one(task, final_run_id)
-            try:
-                verdict = self._evaluator(task, run)
-            except Exception as e:  # noqa: BLE001 —— 自定义评测器抛异常也不能中断整轮
-                verdict = TaskVerdict(
-                    task_id=task.task_id, error=f"评测器异常：{type(e).__name__}: {e}"
-                )
-            if self._judge is not None and index < judge_limit:
-                await self._apply_judge(task, run, verdict)
+            stored = reused.get(task.task_id)
+            if stored is not None:
+                run, verdict = stored[0], replace(stored[1], skipped=True)
+            else:
+                run = await self._run_one(task, final_run_id)
+                try:
+                    verdict = self._evaluator(task, run)
+                except Exception as e:  # noqa: BLE001 —— 自定义评测器抛异常也不能中断整轮
+                    verdict = TaskVerdict(
+                        task_id=task.task_id, error=f"评测器异常：{type(e).__name__}: {e}"
+                    )
+                if self._judge is not None and index < judge_limit:
+                    await self._apply_judge(task, run, verdict)
+                if on_verdict is not None:
+                    # 成功与失败都回调（进度文件要如实记录失败，续跑时才不会把它当已完成）
+                    on_verdict(run, verdict)
             runs.append(run)
             verdicts.append(verdict)
             if on_progress is not None:

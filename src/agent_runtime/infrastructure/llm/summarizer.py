@@ -60,9 +60,15 @@ def build_summarizer(
 
     async def summarize(text: str) -> str:
         started = time.perf_counter()
-        resp = await provider.chat(
-            [Message(role="user", content=prompt.format(text=text))]
-        )
+        try:
+            resp = await provider.chat(
+                [Message(role="user", content=prompt.format(text=text))]
+            )
+        except BaseException:
+            # 墙钟是真花掉了（token 未知所以不记）：真实消融撞限流/超时时，
+            # 摘要耗时不该被系统性少计（审查 M-8）
+            stats["total_ms"] += int((time.perf_counter() - started) * 1000)
+            raise
         stats["calls"] += 1
         stats["total_tokens"] += _usage_tokens(resp)
         stats["total_ms"] += int((time.perf_counter() - started) * 1000)

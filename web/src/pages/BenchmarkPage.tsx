@@ -13,6 +13,8 @@ const METRIC_ROWS: { label: string; key: keyof BenchmarkMetrics; kind: Kind }[] 
   { label: "任务数", key: "tasks_total", kind: "int" },
   { label: "出错任务数", key: "tasks_errored", kind: "int" },
   { label: "成功率", key: "success_rate", kind: "pct" },
+  { label: "成功率(排除 provider)", key: "success_rate_measured", kind: "pct" },
+  { label: "provider 错误", key: "provider_errors", kind: "int" },
   { label: "工具选择准确率", key: "tool_selection_accuracy", kind: "pct" },
   { label: "工具参数准确率", key: "tool_argument_accuracy", kind: "pct" },
   { label: "平均步数", key: "avg_steps", kind: "num" },

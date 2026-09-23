@@ -105,6 +105,11 @@ class TaskVerdict:
     judge_scores: dict[str, int] | None = None
     judge_reason: str = ""
 
+    skipped: bool = False
+    """这条判分是从**进度文件**捡回来的（上一轮已经成功跑过），不是本轮刚跑的。
+
+    报告里必须能看出这一点：续跑过的报告不能看起来像"这一轮从头跑完的"。"""
+
 
 @dataclass
 class BenchmarkMetrics:

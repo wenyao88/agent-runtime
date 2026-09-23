@@ -265,6 +265,117 @@ def test_format_ablation_prints_a_side_by_side_table() -> None:
     assert "—" in text, "没测的指标必须是 —（success_rate_measured=None）"
 
 
+def test_resume_continues_the_unfinished_run_and_skips_completed_tasks() -> None:
+    """`--resume` 接着**没跑完**的那一轮：已成功的条目跳过（报告里 `resumed` 自证）。"""
+    module = _load()
+    import json
+
+    out = _new_dir()
+    try:
+        assert module.main(["--provider", "mock", "--limit", "2", "--out", str(out)]) == 0
+        reports = list(out.glob("*.json"))
+        assert len(reports) == 1
+        run_id = reports[0].stem
+        reports[0].unlink()  # 模拟"还没写最终报告就断了"
+
+        assert module.main(
+            ["--provider", "mock", "--limit", "2", "--out", str(out), "--resume"]
+        ) == 0
+        names = {path.name for path in out.glob("*.json")}
+        assert names == {f"{run_id}.json"}, f"续跑应当写回同一个 run_id：{names}"
+        data = json.loads((out / f"{run_id}.json").read_text(encoding="utf-8"))
+        assert data["config"]["resumed"] == 2
+        assert all(v["skipped"] for v in data["verdicts"])
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_a_finished_run_is_not_resumed() -> None:
+    """跑完的不再续（最终报告已在磁盘上）——`--resume` 会开新一轮，而不是把完成的那轮改坏。"""
+    module = _load()
+    out = _new_dir()
+    try:
+        assert module.main(["--provider", "mock", "--limit", "1", "--out", str(out)]) == 0
+        assert module.main(
+            ["--provider", "mock", "--limit", "1", "--out", str(out), "--resume"]
+        ) == 0
+        assert len(list(out.glob("*.json"))) == 2, "应当是一轮新的，不是覆盖"
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_ablation_resume_reuses_the_unfinished_round() -> None:
+    module = _load()
+    import json
+
+    out = _new_dir()
+    try:
+        assert module.main(
+            ["--provider", "mock", "--ablation", "--limit", "2", "--out", str(out)]
+        ) == 0
+        comparison = [path for path in out.glob("*-ablation.json")][0]
+        ablation_id = comparison.stem
+        comparison.unlink()  # 模拟"第三组还没跑完就断了"
+
+        assert module.main(
+            ["--provider", "mock", "--ablation", "--limit", "2", "--out", str(out), "--resume"]
+        ) == 0
+        assert (out / f"{ablation_id}.json").exists(), "应当续跑同一个 ablation id"
+        for name in ("baseline", "memory", "memory_compaction"):
+            data = json.loads((out / f"{ablation_id}-{name}.json").read_text(encoding="utf-8"))
+            assert data["config"]["resumed"] == 2, name
+        assert len(list(out.glob("*-ablation.json"))) == 1, "不该多出一轮"
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_ablation_id_pins_the_round() -> None:
+    module = _load()
+    out = _new_dir()
+    try:
+        assert module.main(
+            [
+                "--provider", "mock", "--ablation", "--limit", "1",
+                "--out", str(out), "--ablation-id", "ab-fixed",
+            ]
+        ) == 0
+        names = {path.name for path in out.glob("*.json")}
+        assert names == {
+            "ab-fixed.json",
+            "ab-fixed-baseline.json",
+            "ab-fixed-memory.json",
+            "ab-fixed-memory_compaction.json",
+        }, names
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_ablation_id_continues_the_same_round() -> None:
+    """`--ablation-id` 是"接着这一轮跑"：同一 id 再跑一次不会多出一轮，也不会重跑已成功的条目。"""
+    module = _load()
+    import json
+
+    out = _new_dir()
+    try:
+        args = [
+            "--provider", "mock", "--ablation", "--limit", "1",
+            "--out", str(out), "--ablation-id", "ab-fixed",
+        ]
+        assert module.main(args) == 0
+        assert module.main(args) == 0
+        names = {path.name for path in out.glob("*.json")}
+        assert names == {
+            "ab-fixed.json",
+            "ab-fixed-baseline.json",
+            "ab-fixed-memory.json",
+            "ab-fixed-memory_compaction.json",
+        }, names
+        data = json.loads((out / "ab-fixed-baseline.json").read_text(encoding="utf-8"))
+        assert data["config"]["resumed"] == 1, "第二次应当复用已成功的那条"
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
 def _run_all() -> None:
     failed: list[str] = []
     tests = [
