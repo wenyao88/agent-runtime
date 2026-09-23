@@ -641,6 +641,7 @@ async def test_compaction_event_reports_a_successful_summary() -> None:
     assert data["degraded_from"] is None
     assert data["reason"] == ""
     assert data["summarized"] >= 1
+    assert data["noop"] is False, "真做了摘要就不是 noop"
 
 
 async def test_compaction_never_orphans_a_tool_result_from_the_same_batch() -> None:

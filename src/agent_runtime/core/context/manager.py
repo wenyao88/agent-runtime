@@ -121,8 +121,7 @@ class ContextManager:
             result.messages_squeezed = self._squeeze()
             if strategy is not None or not self.should_compact():
                 # 显式要求 SQUEEZE，或自动模式下压完已经不超了。
-                result.tokens_after = self.token_count()
-                return result
+                return self._finish(result)
 
         # 显式 TRUNCATE/SUMMARIZE，或自动模式下 SQUEEZE 没压下去：
         # **先试摘要，再丢消息** —— TRUNCATE 一跑，要摘要的素材就没了。
@@ -132,9 +131,8 @@ class ContextManager:
             if ok:
                 result.strategy = CompactionStrategy.SUMMARIZE
                 if not self.should_compact():
-                    result.tokens_after = self.token_count()
-                    return result
-            else:
+                    return self._finish(result)
+            elif ok is False:
                 result.degraded_from = CompactionStrategy.SUMMARIZE
                 degraded = True
 
@@ -143,7 +141,19 @@ class ContextManager:
         if degraded or dropped:
             # 摘要没做成、或摘要后仍超阈值又丢了一批 → 真正把体积降下来的是 TRUNCATE
             result.strategy = CompactionStrategy.TRUNCATE
+        return self._finish(result)
+
+    def _finish(self, result: CompactionResult) -> CompactionResult:
+        """统一收尾：算最终 token 与 `noop`。
+
+        `noop` 必须覆盖**所有**返回路径，否则同一个"什么都没做"会因走的分支不同而报得不一样。
+        """
         result.tokens_after = self.token_count()
+        result.noop = not (
+            result.messages_squeezed
+            or result.messages_dropped
+            or result.summarized_messages
+        )
         return result
 
     # ── 内部策略实现 ──
@@ -177,10 +187,11 @@ class ContextManager:
         old = rest[: len(rest) - len(keep)]
         return head, old, keep
 
-    async def _try_summarize(self, result: CompactionResult) -> bool:
+    async def _try_summarize(self, result: CompactionResult) -> bool | None:
         """把"保留段之外"的早期消息折叠成一条带标记的摘要。**绝不外抛**。
 
-        失败原因写进 `result.degraded_reason`，由调用方把策略落回 TRUNCATE。
+        返回：`True` 已摘要 / `False` 想摘要但失败了（调用方据此记降级）/
+        `None` **没有可做的事**（没有早期消息 —— 这不是降级，别统计成"想摘要没做成"）。
         """
         if self._summarizer is None:
             # 先报"没配"再报"没素材"：前者更可操作（用户知道该补什么配置）
@@ -192,7 +203,7 @@ class ContextManager:
         head, old, keep = self._split_old()
         if not old:
             result.degraded_reason = "没有可摘要的早期消息"
-            return False
+            return None
 
         # 上一轮的摘要要一并喂进去，否则跨多轮压缩会一层层丢信息
         previous = self._pinned_summary

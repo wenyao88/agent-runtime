@@ -40,6 +40,12 @@ class CompactionResult:
     degraded_reason: str = ""
     """人可读的降级原因。**必须有人读它** —— 静默降级是本项目反复踩的坑。"""
 
+    noop: bool = False
+    """本轮什么都没改变（保留窗口本身已超预算，且没有可摘要的早期消息）。
+
+    必须与"降级"分开：没事可做 ≠ 想做什么没做成。否则 Trace/Benchmark 会把每一次
+    "压不动"都统计成一次降级，长任务的统计数字就全错了。"""
+
     @property
     def saved_tokens(self) -> int:
         return max(0, self.tokens_before - self.tokens_after)

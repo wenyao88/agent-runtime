@@ -337,14 +337,46 @@ def test_summarize_without_summarizer_says_it_is_not_configured() -> None:
     assert "未配置" in result.degraded_reason
 
 
-def test_summarize_with_nothing_to_fold_degrades() -> None:
+def test_summarize_with_nothing_to_fold_reports_a_noop() -> None:
+    """没有早期消息可摘要 = "没事可做"，**不是**降级（审查 I5）。
+
+    旧行为报 `strategy=truncate, degraded_from=summarize, reason=没有可摘要的早期消息` ——
+    一次什么都没截断的"截断 + 降级"，Phase 6/7 会把它统计成"想摘要却没做成"。
+    """
+
     async def run():
         cm = await _built_with_summarizer(6, _recording_summarizer([]))
         return await cm.compact(strategy=CompactionStrategy.SUMMARIZE)
 
     result = asyncio.run(run())
-    assert result.strategy is CompactionStrategy.TRUNCATE
+    assert result.noop is True
+    assert result.degraded_from is None, "没事可做 ≠ 降级"
+    assert result.summarized_messages == 0
     assert "没有可摘要" in result.degraded_reason
+
+
+def test_repeated_compaction_reports_a_noop_instead_of_a_fake_degradation() -> None:
+    """保留窗口本身超预算时，后续压缩什么都做不了，必须如实报 noop（审查 I5）。"""
+
+    async def run():
+        budget = TokenBudget(model_max_tokens=1_000_000, reserved_output=0, safety_margin=1.0)
+        cm = ContextManager(
+            budget=budget, keep_recent=1, summarizer=_recording_summarizer([])
+        )
+        await cm.build(task="任务", system_prompt="system")
+        cm.append(Message(role="assistant", content="旧" * 100))
+        cm.append(Message(role="assistant", content="最近" * 20000))
+        budget.model_max_tokens = max(1, int(cm.token_count() / 0.98))
+        first = await cm.compact()
+        second = await cm.compact()
+        return first, second
+
+    first, second = asyncio.run(run())
+    assert first.summarized_messages == 1 and first.noop is False
+    assert second.noop is True, "第二次什么都没改，必须如实报 noop"
+    assert second.tokens_before == second.tokens_after
+    assert second.degraded_from is None, "没做成的摘要才叫降级；这里是没有可做的事"
+    assert second.messages_dropped == 0
 
 
 def test_summarize_never_keeps_an_orphan_tool_message() -> None:

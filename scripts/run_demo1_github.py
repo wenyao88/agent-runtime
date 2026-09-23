@@ -77,7 +77,9 @@ def format_compaction(data: dict) -> str:
     事件里早就有这些字段了，CLI 却只打印 `strategy` —— 又是一次"机制做了、展示层藏起来"。
     """
     line = f"⚡ 压缩 {data.get('before')} → {data.get('after')}（{data.get('strategy')}）"
-    if data.get("summarized"):
+    if data.get("noop"):
+        line += " · 无可压缩内容（保留窗口本身已超预算）"
+    elif data.get("summarized"):
         line += f" · 摘要 {data['summarized']} 条"
     if data.get("degraded_from"):
         line += f" · ⚠ 降级自 {data['degraded_from']}：{data.get('reason') or '未说明'}"

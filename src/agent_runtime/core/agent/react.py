@@ -222,7 +222,9 @@ class ReActLoop:
                         cr.degraded_from.value if cr.degraded_from else None
                     ),
                     "reason": cr.degraded_reason,
-                    "summarized": cr.summarized_messages})
+                    "summarized": cr.summarized_messages,
+                    # 什么都没改变也要如实报（否则"压不动"看起来像一次成功的压缩）
+                    "noop": cr.noop})
 
         warnings: list[str] = []
         if tool_calls_total and tool_calls_failed == tool_calls_total:

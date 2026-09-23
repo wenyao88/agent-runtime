@@ -484,6 +484,17 @@ def test_format_compaction_tolerates_a_missing_reason() -> None:
     assert "⚠" in line and "未说明" in line, line
 
 
+def test_format_compaction_marks_a_noop() -> None:
+    """什么都没改的压缩不能看起来像一次成功的压缩。"""
+    module = _load()
+    line = module.format_compaction(
+        {"before": 100, "after": 100, "strategy": "summarize", "summarized": 0,
+         "degraded_from": None, "reason": "没有可摘要的早期消息", "noop": True}
+    )
+    assert "无可压缩内容" in line, line
+    assert "⚠" not in line
+
+
 def _run_all() -> None:
     failed: list[str] = []
     tests = [
