@@ -137,6 +137,19 @@ def test_a_save_failure_is_logged_not_only_stored() -> None:
     assert any("落盘失败" in message for message in records), records
 
 
+def test_benchmark_config_merges_extra_snapshot_fields() -> None:
+    """消融要往 config 里写开关快照（group/memory/compaction/session_scope）。"""
+    from agent_runtime.infrastructure.benchmark.service import benchmark_config
+
+    config = benchmark_config("real", model="m", judge=2, group="memory", session_scope="run")
+    assert config["provider"] == "real" and config["model"] == "m" and config["judge"] == 2
+    assert config["group"] == "memory" and config["session_scope"] == "run"
+    assert "synthetic" not in config, "真实 provider 不能被标成夹具"
+
+    mock_config = benchmark_config("mock", group="baseline")
+    assert mock_config["synthetic"] is True and mock_config["group"] == "baseline"
+
+
 def test_runner_receives_the_fixed_run_id() -> None:
     runner, _ = build_runner(_FakeSettings(), MOCK_PROVIDER)
     report = asyncio.run(

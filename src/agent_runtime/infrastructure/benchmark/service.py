@@ -29,11 +29,14 @@ def new_run_id(provider_label: str, *, now: datetime | None = None) -> str:
     return f"{stamp}-{label}-{secrets.token_hex(2)}"
 
 
-def benchmark_config(provider_label: str, *, model: str = "", judge: int = 0) -> dict:
+def benchmark_config(
+    provider_label: str, *, model: str = "", judge: int = 0, **extra: object
+) -> dict:
     """报告配置的**唯一**构造处。
 
     `mock` 必须带上 `synthetic: True`：Phase 7 会把多份报告放在一起对比，
     夹具与真实成绩混在一起就是假数据（审查 M9）。
+    `extra` 供消融分组写入开关快照（`group`/`memory`/`compaction`/`session_scope`）。
     """
     label = (provider_label or "").strip().lower() or "run"
     config: dict = {
@@ -43,6 +46,7 @@ def benchmark_config(provider_label: str, *, model: str = "", judge: int = 0) ->
     }
     if label == MOCK_PROVIDER:
         config["synthetic"] = True
+    config.update(extra)
     return config
 
 
