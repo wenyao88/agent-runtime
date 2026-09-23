@@ -71,16 +71,25 @@ def format_skills(skills_used: object) -> str:
     return f"🎯 命中技能：{', '.join(names)}"
 
 
+def _format_problems(label: str, problems: object) -> str:
+    items = [str(e) for e in (problems or [])]
+    if not items:
+        return ""
+    return f"⚠ {label}：" + "；".join(items)
+
+
 def format_memory_errors(errors: object) -> str:
     """记忆层装配问题的可视化一行；没有问题就返回空串。
 
     与 `format_warning` / `format_skills` 同理：本项目已经两次栽在"机制做了、展示层藏起来"。
     这次也一样 —— "记忆层根本没装上"在输出里完全没痕迹，才拖到本机实测才发现。
     """
-    items = [str(e) for e in (errors or [])]
-    if not items:
-        return ""
-    return "⚠ 记忆层问题：" + "；".join(items)
+    return _format_problems("记忆层问题", errors)
+
+
+def format_context_errors(errors: object) -> str:
+    """上下文（压缩摘要器）装配问题的可视化一行；没有问题就返回空串。"""
+    return _format_problems("上下文问题", errors)
 
 
 def format_summary(result: object) -> str:
@@ -137,17 +146,21 @@ def build_skill_router(settings: object):
     return router
 
 
-def build_agent(settings: object | None = None, llm: object | None = None):
-    """真实链路：真实 LLM + 全部原生工具（含 4 个 GitHub 工具）+ 真实技能。
+def build_agent(
+    settings: object | None = None,
+    llm: object | None = None,
+    provider_factory: object | None = None,
+):
+    """真实链路：真实 LLM + 全部原生工具（含 4 个 GitHub 工具）+ 真实技能 + 记忆/压缩装配。
 
-    `settings` / `llm` 可注入：沙箱里装不上 openai / pydantic_settings，
-    只有让这两样可注入，"到底装配了哪些东西"才能被测试真正验证（而不是靠读码相信）。
+    `settings` / `llm` / `provider_factory` 可注入：沙箱里装不上 openai / pydantic_settings，
+    只有让它们可注入，"到底装配了哪些东西"才能被测试真正验证（而不是靠读码相信）。
+    `provider_factory` 是压缩摘要器的假 provider，用来证明摘要器真的被接上了。
     """
     from agent_runtime.core.agent.react import ReActLoop
-    from agent_runtime.core.context.budget import TokenBudget
-    from agent_runtime.core.context.manager import ContextManager
     from agent_runtime.core.tool.registry import ToolRegistry
     from agent_runtime.core.trace.tracer import Tracer
+    from agent_runtime.infrastructure.context.catalog import build_context_manager
     from agent_runtime.infrastructure.memory.catalog import build_memory_manager
     from agent_runtime.infrastructure.tools.catalog import register_native_tools
 
@@ -183,19 +196,24 @@ def build_agent(settings: object | None = None, llm: object | None = None):
             temperature=settings.llm_temperature,
         )
 
-    # 记忆层装配与 API **同源**（infrastructure/memory/catalog.py）：
-    # 之前这里自己拼了个没有持久层的空壳 manager —— 于是 `--session-id` 写了也读不到。
+    # 记忆层与上下文压缩都与 API **同源**（infrastructure/*/catalog.py）：
+    # 之前这里自己拼了没有持久层的空壳 memory manager、也自己 new 了一个 ContextManager ——
+    # 于是开关打开了、`--session-id` 也传对了，却什么都读不到（Phase 4 本机实测的漏装配）。
     memory_manager, memory_errors = build_memory_manager(settings)
-    rendered = format_memory_errors(memory_errors)
-    if rendered:
-        print(rendered)
+    context_manager, context_errors = build_context_manager(
+        settings, provider_factory=provider_factory
+    )
+    for rendered in (
+        format_memory_errors(memory_errors),
+        format_context_errors(context_errors),
+    ):
+        if rendered:
+            print(rendered)
 
     return ReActLoop(
         llm=llm,
         tool_registry=registry,
-        context_manager=ContextManager(
-            budget=TokenBudget(model_max_tokens=settings.llm_max_tokens)
-        ),
+        context_manager=context_manager,
         memory_manager=memory_manager,
         skill_router=build_skill_router(settings),
         skill_top_k=int(getattr(settings, "agent_skill_top_k", 1)),

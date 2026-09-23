@@ -14,6 +14,8 @@ def create_app() -> FastAPI:
         """
         from ..infrastructure.mcp.client import MCPClient, bootstrap_mcp
         from .deps import (
+            get_context_errors,
+            get_context_manager,
             get_memory_errors,
             get_memory_manager,
             get_settings,
@@ -51,6 +53,13 @@ def create_app() -> FastAPI:
             app.state.memory_errors = get_memory_errors()
         except Exception as e:  # noqa: BLE001 —— 记忆是可选能力，永不阻断启动
             app.state.memory_errors = [f"memory 装配异常：{type(e).__name__}: {e}"]
+
+        # 上下文：只装配压缩摘要器（默认关，单例由 deps 管）。缺 key/缺依赖只记错误。
+        try:
+            get_context_manager()
+            app.state.context_errors = get_context_errors()
+        except Exception as e:  # noqa: BLE001 —— 摘要是可选能力，永不阻断启动
+            app.state.context_errors = [f"context 装配异常：{type(e).__name__}: {e}"]
 
         try:
             yield

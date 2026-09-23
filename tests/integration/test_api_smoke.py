@@ -135,6 +135,7 @@ def test_chat_and_ws_smoke() -> None:
             assert mem_body["settings"]["long_term"]["enabled"] is False, mem_body
             assert mem_body["count"] == 0 and mem_body["memories"] == [], mem_body
             assert app.state.memory_errors == [], app.state.memory_errors
+            assert app.state.context_errors == [], app.state.context_errors
 
             # ── REST: DELETE /api/memories ──
             del_resp = client.delete("/api/memories")

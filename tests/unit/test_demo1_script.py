@@ -176,6 +176,9 @@ class _FakeSettings:
         self.judge_llm_api_key = ""
         self.judge_llm_base_url = ""
         self.judge_llm_model = "test-judge"
+        # 上下文压缩（Phase 5）
+        self.agent_context_compaction_threshold = 0.8
+        self.agent_compaction_summarize_enabled = False
         for key, value in overrides.items():
             setattr(self, key, value)
 
@@ -363,6 +366,83 @@ def test_format_memory_errors_marks_each_problem() -> None:
     )
     assert "⚠" in text
     assert "EMBEDDING_API_KEY" in text
+
+
+class _FakeSummaryProvider:
+    """假摘要 provider：用来证明 demo 真的把摘要器接上了（沙箱装不上 openai）。"""
+
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+
+    async def chat(self, messages, tools=None):  # noqa: ANN001
+        import types
+
+        return types.SimpleNamespace(content="早期经过摘要")
+
+
+def test_build_agent_uses_the_shared_context_assembly() -> None:
+    """核心回归：demo 的 `ContextManager` 必须来自 `build_context_manager`（与 API 同源）。
+
+    Phase 4 就是这么漂移的：`build_agent` 自己拼了个没有持久层的 `MemoryManager`，
+    于是 `--session-id` 传对了、开关也开了，Redis 里却一条都没有。
+    这里用「预算=1 必然压缩 + 注入假 provider」把装配路径端到端钉住：
+    摘要器在、prompt 走到了 provider、事件里如实报 summarize。
+    """
+    import asyncio
+
+    from agent_runtime.core.agent.events import AgentEventType
+    from agent_runtime.core.llm.types import FunctionCall, LLMResponse
+    from agent_runtime.infrastructure.llm.mock import MockLLMProvider
+
+    module = _load()
+    built: list[dict] = []
+
+    def factory(**kwargs):
+        built.append(kwargs)
+        return _FakeSummaryProvider(**kwargs)
+
+    agent = module.build_agent(
+        settings=_FakeSettings(
+            llm_max_tokens=1,  # 压缩阈值 = 0 → 每个工具结果之后都会压一次
+            agent_compaction_summarize_enabled=True,
+            judge_llm_api_key="sk-judge",
+        ),
+        llm=MockLLMProvider(
+            [
+                LLMResponse(
+                    content=None,
+                    tool_calls=[
+                        FunctionCall(
+                            id=f"c{i}", name="read_file", arguments='{"path": "README.md"}'
+                        )
+                    ],
+                )
+                for i in range(1, 5)
+            ]
+            + [LLMResponse(content="报告")]
+        ),
+        provider_factory=factory,
+    )
+
+    async def collect():
+        return [ev async for ev in agent.run_stream(module.build_task("fastapi/fastapi"))]
+
+    events = asyncio.run(collect())
+    compaction = [e for e in events if e.event_type == AgentEventType.COMPACTION]
+    assert compaction, "预算=1 必然触发压缩"
+    assert built and built[0]["api_key"] == "sk-judge", "装配没走到共享 catalog"
+    # 消息足够多（> keep_recent）时才有的可摘；短历史会如实报"没有可摘要的早期消息"
+    assert any(e.data["strategy"] == "summarize" for e in compaction), [
+        e.data for e in compaction
+    ]
+
+
+def test_format_context_errors_marks_each_problem() -> None:
+    module = _load()
+    assert module.format_context_errors([]) == ""
+    assert module.format_context_errors(None) == ""
+    text = module.format_context_errors(["AGENT_COMPACTION_SUMMARIZE_ENABLED=true 但缺 key"])
+    assert "⚠" in text and "上下文" in text and "缺 key" in text
 
 
 def _run_all() -> None:

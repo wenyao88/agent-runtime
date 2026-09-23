@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     agent_max_steps: int = 15
     agent_tool_timeout_seconds: int = 30
     agent_context_compaction_threshold: float = 0.8
+    agent_compaction_summarize_enabled: bool = False  # SUMMARIZE 压缩：额外一次 LLM 调用，默认关
 
     # GitHub
     github_token: str = ""

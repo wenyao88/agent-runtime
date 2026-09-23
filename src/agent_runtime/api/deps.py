@@ -4,12 +4,12 @@ from pathlib import Path
 from agent_runtime.config.settings import Settings
 from agent_runtime.core.agent.planner import TaskPlanner
 from agent_runtime.core.agent.react import ReActLoop
-from agent_runtime.core.context.budget import TokenBudget
 from agent_runtime.core.context.manager import ContextManager
 from agent_runtime.core.memory.manager import MemoryManager
 from agent_runtime.core.skill.router import SkillRouter
 from agent_runtime.core.tool.registry import ToolRegistry
 from agent_runtime.core.trace.tracer import Tracer
+from agent_runtime.infrastructure.context.catalog import build_context_manager
 from agent_runtime.infrastructure.memory.catalog import build_memory_manager
 from agent_runtime.infrastructure.skills.catalog import (
     register_skills_from_dir,
@@ -20,6 +20,7 @@ from agent_runtime.infrastructure.tools.catalog import register_native_tools
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _skill_errors: list[str] = []
 _memory_errors: list[str] = []
+_context_errors: list[str] = []
 
 
 @lru_cache
@@ -70,14 +71,21 @@ def get_memory_errors() -> list[str]:
 
 
 def get_context_manager() -> ContextManager:
-    settings = get_settings()
-    return ContextManager(
-        budget=TokenBudget(
-            model_max_tokens=settings.llm_max_tokens,
-            compaction_ratio=settings.agent_context_compaction_threshold,
-        ),
-        memory_max_chars=settings.memory_inject_max_chars,
-    )
+    """上下文装配（薄封装：本体在 `infrastructure/context/catalog.py`）。
+
+    与 `scripts/run_demo1_github.py` **共用同一处装配** —— Phase 4 的 `memory_manager`
+    就是因为脚本自己拼一套而漂移，结果 `--session-id` 传对了也读不到任何东西。
+    缺 key / 缺依赖 → **不构造摘要器**并把原因记进 `_context_errors`（供 lifespan 暴露），绝不阻断启动。
+    """
+    _context_errors.clear()
+    manager, errors = build_context_manager(get_settings())
+    _context_errors.extend(errors)
+    return manager
+
+
+def get_context_errors() -> list[str]:
+    """上下文装配错误（缺 key / 缺依赖）。只用于可见性，绝不影响启动。"""
+    return list(_context_errors)
 
 
 @lru_cache
