@@ -186,12 +186,13 @@ def build_agent(settings: object | None = None, llm: object | None = None):
     )
 
 
-async def run(repo: str, focus: str) -> int:
+async def run(repo: str, focus: str, session_id: str = "") -> int:
     agent = build_agent()
     task = build_task(repo, focus)
-    print(f"\n任务：{task}\n" + "─" * 72)
+    print(f"\n任务：{task}\n会话：{session_id or 'default'}\n" + "─" * 72)
 
-    async for event in agent.run_stream(task):
+    # 会话标识透传给 ReActLoop：短时记忆按会话隔离，不传就全落 default（多会话会互相污染）
+    async for event in agent.run_stream(task, session_id=session_id):
         kind = event.event_type.value
         data = event.data
         if kind == "step_start":
@@ -227,6 +228,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Demo 1：GitHub 仓库分析 Agent")
     parser.add_argument("--repo", required=True, help="仓库全名，如 fastapi/fastapi")
     parser.add_argument("--focus", default="", help="额外关注点，如 '错误处理与重试'")
+    parser.add_argument(
+        "--session-id",
+        default="",
+        help="会话标识（短时记忆按会话隔离；不传则用 default）",
+    )
     args = parser.parse_args(argv)
 
     if not args.repo.strip():
@@ -239,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        return asyncio.run(run(args.repo, args.focus))
+        return asyncio.run(run(args.repo, args.focus, args.session_id))
     except RuntimeError as e:
         print(f"错误：{e}")
         return 2

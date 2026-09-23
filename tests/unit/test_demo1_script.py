@@ -268,6 +268,20 @@ def test_summary_omits_skills_line_when_none_matched() -> None:
     assert "命中技能" not in module.format_summary(FakeResult())
 
 
+def test_run_accepts_session_id() -> None:
+    """`--session-id` 必须真的能传到 ReActLoop：短时记忆按会话隔离，不传就全落 default。"""
+    import inspect
+
+    module = _load()
+    assert "session_id" in inspect.signature(module.run).parameters
+
+
+def test_main_accepts_session_id_flag() -> None:
+    module = _load()
+    code = module.main(["--repo", "octocat/Hello-World", "--session-id", "smoke-1"])
+    assert code == 2, "参数应被 argparse 接受（缺依赖时以退出码 2 可读结束）"
+
+
 def _run_all() -> None:
     tests = [
         v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)
