@@ -1,0 +1,194 @@
+{
+  "tasks": [
+    {
+      "task_id": "gh-001",
+      "category": "github_analysis",
+      "task": "分析 GitHub 仓库 pallets/flask，给出结构化报告：项目用途、技术栈、目录结构要点、2-3 条改进建议。",
+      "required_tools": ["github_get_repo", "github_list_dir", "github_read_file"],
+      "expected_keywords": ["flask"],
+      "expected_args": {"github_get_repo": {"repo": "pallets/flask"}},
+      "min_steps": 3,
+      "expected_answer_hints": "项目用途 / 技术栈 / 目录结构 / 改进建议"
+    },
+    {
+      "task_id": "gh-002",
+      "category": "github_analysis",
+      "task": "分析 GitHub 仓库 fastapi/fastapi，给出结构化报告：项目用途、技术栈、目录结构要点、2-3 条改进建议。",
+      "required_tools": ["github_get_repo", "github_list_dir", "github_read_file"],
+      "expected_keywords": ["fastapi"],
+      "expected_args": {"github_get_repo": {"repo": "fastapi/fastapi"}},
+      "min_steps": 3,
+      "expected_answer_hints": "项目用途 / 技术栈 / 目录结构 / 改进建议"
+    },
+    {
+      "task_id": "gh-003",
+      "category": "github_analysis",
+      "task": "分析 GitHub 仓库 psf/requests，给出结构化报告：项目用途、技术栈、目录结构要点、2-3 条改进建议。",
+      "required_tools": ["github_get_repo", "github_list_dir", "github_read_file"],
+      "expected_keywords": ["requests"],
+      "expected_args": {"github_get_repo": {"repo": "psf/requests"}},
+      "min_steps": 3,
+      "expected_answer_hints": "项目用途 / 技术栈 / 目录结构 / 改进建议"
+    },
+    {
+      "task_id": "gh-004",
+      "category": "github_analysis",
+      "task": "分析 GitHub 仓库 django/django，给出结构化报告：项目用途、技术栈、目录结构要点、2-3 条改进建议。",
+      "required_tools": ["github_get_repo", "github_list_dir", "github_read_file"],
+      "expected_keywords": ["django"],
+      "expected_args": {"github_get_repo": {"repo": "django/django"}},
+      "min_steps": 3,
+      "expected_answer_hints": "项目用途 / 技术栈 / 目录结构 / 改进建议"
+    },
+    {
+      "task_id": "gh-005",
+      "category": "github_analysis",
+      "task": "分析 GitHub 仓库 tiangolo/typer，给出结构化报告：项目用途、技术栈、目录结构要点、2-3 条改进建议。",
+      "required_tools": ["github_get_repo", "github_list_dir", "github_read_file"],
+      "expected_keywords": ["typer"],
+      "expected_args": {"github_get_repo": {"repo": "tiangolo/typer"}},
+      "min_steps": 3,
+      "expected_answer_hints": "项目用途 / 技术栈 / 目录结构 / 改进建议"
+    },
+    {
+      "task_id": "gh-006",
+      "category": "github_analysis",
+      "task": "分析 GitHub 仓库 encode/httpx，给出结构化报告：项目用途、技术栈、目录结构要点、2-3 条改进建议。",
+      "required_tools": ["github_get_repo", "github_list_dir", "github_read_file"],
+      "expected_keywords": ["httpx"],
+      "expected_args": {"github_get_repo": {"repo": "encode/httpx"}},
+      "min_steps": 3,
+      "expected_answer_hints": "项目用途 / 技术栈 / 目录结构 / 改进建议"
+    },
+    {
+      "task_id": "gh-007",
+      "category": "github_analysis",
+      "task": "分析 GitHub 仓库 pydantic/pydantic，给出结构化报告：项目用途、技术栈、目录结构要点、2-3 条改进建议。",
+      "required_tools": ["github_get_repo", "github_list_dir", "github_read_file"],
+      "expected_keywords": ["pydantic"],
+      "expected_args": {"github_get_repo": {"repo": "pydantic/pydantic"}},
+      "min_steps": 3,
+      "expected_answer_hints": "项目用途 / 技术栈 / 目录结构 / 改进建议"
+    },
+    {
+      "task_id": "gh-008",
+      "category": "github_analysis",
+      "task": "分析 GitHub 仓库 sqlalchemy/sqlalchemy，给出结构化报告：项目用途、技术栈、目录结构要点、2-3 条改进建议。",
+      "required_tools": ["github_get_repo", "github_list_dir", "github_read_file"],
+      "expected_keywords": ["sqlalchemy"],
+      "expected_args": {"github_get_repo": {"repo": "sqlalchemy/sqlalchemy"}},
+      "min_steps": 3,
+      "expected_answer_hints": "项目用途 / 技术栈 / 目录结构 / 改进建议"
+    },
+    {
+      "task_id": "gh-009",
+      "category": "github_analysis",
+      "task": "分析 GitHub 仓库 pytest-dev/pytest，给出结构化报告：项目用途、技术栈、目录结构要点、2-3 条改进建议。",
+      "required_tools": ["github_get_repo", "github_list_dir", "github_read_file"],
+      "expected_keywords": ["pytest"],
+      "expected_args": {"github_get_repo": {"repo": "pytest-dev/pytest"}},
+      "min_steps": 3,
+      "expected_answer_hints": "项目用途 / 技术栈 / 目录结构 / 改进建议"
+    },
+    {
+      "task_id": "gh-010",
+      "category": "github_analysis",
+      "task": "分析 GitHub 仓库 redis/redis-py，给出结构化报告：项目用途、技术栈、目录结构要点、2-3 条改进建议。",
+      "required_tools": ["github_get_repo", "github_list_dir", "github_read_file"],
+      "expected_keywords": ["redis-py"],
+      "expected_args": {"github_get_repo": {"repo": "redis/redis-py"}},
+      "min_steps": 3,
+      "expected_answer_hints": "项目用途 / 技术栈 / 目录结构 / 改进建议"
+    },
+    {
+      "task_id": "tr-001",
+      "category": "tech_research",
+      "task": "调研向量数据库选型：pgvector 与专用向量库的取舍，给出带出处的结论。",
+      "required_tools": ["web_search", "web_scrape"],
+      "expected_keywords": ["pgvector"],
+      "min_steps": 2,
+      "expected_answer_hints": "检索质量 / 运维成本 / 规模上限 / 生态"
+    },
+    {
+      "task_id": "tr-002",
+      "category": "tech_research",
+      "task": "调研 MCP（Model Context Protocol）：它解决什么问题、怎么接入现有 Agent，给出带出处的结论。",
+      "required_tools": ["web_search", "web_scrape"],
+      "expected_keywords": ["MCP"],
+      "min_steps": 2,
+      "expected_answer_hints": "协议动机 / 传输方式 / 工具发现 / 与函数调用的关系"
+    },
+    {
+      "task_id": "tr-003",
+      "category": "tech_research",
+      "task": "调研 ReAct 与 Plan-and-Execute 两种控制流的取舍，给出带出处的结论。",
+      "required_tools": ["web_search", "web_scrape"],
+      "expected_keywords": ["ReAct"],
+      "min_steps": 2,
+      "expected_answer_hints": "适用场景 / token 成本 / 可控性 / 失败模式"
+    },
+    {
+      "task_id": "tr-004",
+      "category": "tech_research",
+      "task": "调研 Function Calling 的可靠性问题与常见缓解手段，给出带出处的结论。",
+      "required_tools": ["web_search", "web_scrape"],
+      "expected_keywords": ["Function Calling"],
+      "min_steps": 2,
+      "expected_answer_hints": "参数幻觉 / schema 设计 / 重试与校验 / 评测方式"
+    },
+    {
+      "task_id": "tr-005",
+      "category": "tech_research",
+      "task": "调研 RAG 的文档 chunking 策略对检索质量的影响，给出带出处的结论。",
+      "required_tools": ["web_search", "web_scrape"],
+      "expected_keywords": ["chunking"],
+      "min_steps": 2,
+      "expected_answer_hints": "切分粒度 / 重叠 / 语义切分 / 评测指标"
+    },
+    {
+      "task_id": "tr-006",
+      "category": "tech_research",
+      "task": "调研 LLM 应用的评测方法：规则评测与 LLM-as-Judge 的取舍，给出带出处的结论。",
+      "required_tools": ["web_search", "web_scrape"],
+      "expected_keywords": ["LLM-as-Judge"],
+      "min_steps": 2,
+      "expected_answer_hints": "成本 / 一致性 / 偏差 / 何时用规则"
+    },
+    {
+      "task_id": "tr-007",
+      "category": "tech_research",
+      "task": "调研上下文压缩策略：截断、摘要、检索式压缩的取舍，给出带出处的结论。",
+      "required_tools": ["web_search", "web_scrape"],
+      "expected_keywords": ["摘要"],
+      "min_steps": 2,
+      "expected_answer_hints": "信息损失 / 额外 LLM 成本 / 触发时机 / 可观测性"
+    },
+    {
+      "task_id": "tr-008",
+      "category": "tech_research",
+      "task": "调研多智能体协作的常见拓扑与失败模式，给出带出处的结论。",
+      "required_tools": ["web_search", "web_scrape"],
+      "expected_keywords": ["多智能体"],
+      "min_steps": 2,
+      "expected_answer_hints": "拓扑 / 通信成本 / 冲突消解 / 适用边界"
+    },
+    {
+      "task_id": "tr-009",
+      "category": "tech_research",
+      "task": "调研本地 embedding 模型选型：bge 系列与同类模型的取舍，给出带出处的结论。",
+      "required_tools": ["web_search", "web_scrape"],
+      "expected_keywords": ["bge"],
+      "min_steps": 2,
+      "expected_answer_hints": "检索效果 / 维度与成本 / 中文表现 / 部署方式"
+    },
+    {
+      "task_id": "tr-010",
+      "category": "tech_research",
+      "task": "调研 pgvector 的索引选型：ivfflat 与 hnsw 的取舍，给出带出处的结论。",
+      "required_tools": ["web_search", "web_scrape"],
+      "expected_keywords": ["hnsw"],
+      "min_steps": 2,
+      "expected_answer_hints": "召回率 / 建索引成本 / 内存占用 / 写入性能"
+    }
+  ]
+}
