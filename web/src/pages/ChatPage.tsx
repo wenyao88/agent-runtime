@@ -14,7 +14,7 @@ import {
 import { WS_BASE_URL } from "../api/client";
 import type { AgentStreamEvent, ChatMessage } from "../types";
 
-const EXAMPLES = ["读取 计划.md 并总结要点", "分析 README.md 的结构"];
+const EXAMPLES = ["读取 src/agent_runtime/core/agent/react.py 并总结", "分析 README.md 的结构"];
 
 const MARKDOWN_CLASS = [
   "text-sm text-slate-800",

@@ -19,9 +19,8 @@ web/dist/
 .env
 .env.local
 
-# Test residue (sandbox ACL-locked temp dirs)
+# Test residue
 .testtmp/
-tmp8aozlrn8/
 
 # IDE
 .idea/

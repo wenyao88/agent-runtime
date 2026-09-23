@@ -16,6 +16,11 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "src"))
 
+# 演示要读的文件：必须在仓库里真实存在（`tests/unit/test_demo_mock_script.py` 钉住这一点）
+TARGET_FILE = "README.md"
+# 第二个工具调用**故意**读一个不存在的文件，用来演示"工具报错被模型自行纠正"
+MISSING_FILE = "nope.md"
+
 from agent_runtime.core.agent.react import ReActLoop  # noqa: E402
 from agent_runtime.core.context.budget import TokenBudget  # noqa: E402
 from agent_runtime.core.context.manager import ContextManager  # noqa: E402
@@ -43,7 +48,7 @@ def _usage(p: int, c: int) -> TokenUsage:
 
 
 async def main() -> int:
-    task = "读取 计划.md，先看项目定位那一节，然后总结这个项目要做什么"
+    task = f"读取 {TARGET_FILE}，先看项目定位那一节，然后总结这个项目要做什么"
 
     registry = ToolRegistry()
     registry.register(FileReaderTool(root=str(_ROOT)))
@@ -53,14 +58,22 @@ async def main() -> int:
             LLMResponse(
                 content="先读文件看看内容。",
                 tool_calls=[
-                    FunctionCall(id="c1", name="read_file", arguments='{"path": "计划.md"}')
+                    FunctionCall(
+                        id="c1",
+                        name="read_file",
+                        arguments='{"path": "%s"}' % TARGET_FILE,
+                    )
                 ],
                 token_usage=_usage(820, 40),
             ),
             LLMResponse(
-                content="内容太长，我试试读一个不存在的文件来确认路径规则。",
+                content="再看看路径不存在时工具会返回什么。",
                 tool_calls=[
-                    FunctionCall(id="c2", name="read_file", arguments='{"path": "nope.md"}')
+                    FunctionCall(
+                        id="c2",
+                        name="read_file",
+                        arguments='{"path": "%s"}' % MISSING_FILE,
+                    )
                 ],
                 token_usage=_usage(1180, 52),
             ),
@@ -69,7 +82,7 @@ async def main() -> int:
                     "## 结论\n\n"
                     "这个项目的定位是**技术研究与研发 Agent Runtime**：\n\n"
                     "1. 从 0 到 1 自研 Agent 核心运行框架（ReAct / Tool Registry / "
-                    "Context / Memory / Compaction / Trace / Benchmark）；\n"
+                    "Context / Memory / Compaction / Trace）；\n"
                     "2. 底层能力复用成熟组件（LLM API、MCP SDK、FastAPI、PostgreSQL、Redis）；\n"
                     "3. 用 GitHub 仓库分析 + 技术调研两个真实场景验证有效性。\n\n"
                     "> 重点不是做 Chatbot，而是自己实现 Runtime 核心能力。"
@@ -110,7 +123,7 @@ async def main() -> int:
     print(f"步数 {len(r.steps)} · LLM 调用 {llm.calls} 次 · "
           f"token {r.total_tokens.total_tokens} · 耗时 {r.total_latency_ms}ms · "
           f"trace {r.trace_id} · warning {r.warning}")
-    print(f"工具错误恢复：2 次调用中 1 次失败并被模型自行纠正 → 最终仍产出答案")
+    print("工具错误恢复：2 次调用中 1 次失败并被模型自行纠正 → 最终仍产出答案")
     return 0
 
 

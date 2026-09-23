@@ -50,7 +50,7 @@ def _build_agent():
             LLMResponse(
                 content="先读文件",
                 tool_calls=[
-                    FunctionCall(id="call_1", name="read_file", arguments='{"path": "计划.md"}')
+                    FunctionCall(id="call_1", name="read_file", arguments='{"path": "README.md"}')
                 ],
             ),
             LLMResponse(content="最终答案：已读取"),
@@ -68,7 +68,7 @@ def _build_agent():
 
 
 # 命中 github_analysis 的中文任务（trigger 含「代码结构」）
-TASK = "看看 fastapi/fastapi 的代码结构，并读取 计划.md"
+TASK = "看看 fastapi/fastapi 的代码结构，并读取 README.md"
 
 
 def test_chat_and_ws_smoke() -> None:
