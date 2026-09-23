@@ -1,0 +1,166 @@
+"""Benchmark Runner：把一份任务集跑成一份**自带配置**的报告（纯编排，零第三方依赖）。
+
+三条设计要点：
+  1. **注入 agent 工厂**：runner 不 import 任何真实 provider，沙箱里用假 agent 就能测整条管线；
+     每条任务都新建 agent（复用会让上一条的上下文/记忆污染下一条的成绩）。
+  2. **只观察，不改造**：通过 `run_stream` 收集 `tool_result`（成功/失败）与 `compaction`（压缩比），
+     不改 `ReActLoop` / `AgentResult` 的行为。
+  3. **单条任务失败不中断整轮**：一条任务炸了就丢掉整批结果，等于没有评测 —— 记进 `TaskRun.error` 继续跑。
+"""
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from datetime import datetime
+from typing import Any
+
+from ..agent.base import AgentResult
+from .evaluator import evaluate
+from .metrics import summarize
+from .models import (
+    BenchmarkReport,
+    BenchmarkTask,
+    CompactionEvent,
+    TaskRun,
+    TaskVerdict,
+    ToolEvent,
+)
+
+Judge = Callable[[BenchmarkTask, str], Awaitable[dict | None]]
+AgentFactory = Callable[[], Any]
+RunIdFactory = Callable[[dict], str]
+
+_TOOL_RESULT = "tool_result"
+_COMPACTION = "compaction"
+
+
+def _default_run_id(config: dict) -> str:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"{stamp}-{config.get('provider') or 'run'}"
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+class BenchmarkRunner:
+    def __init__(
+        self,
+        agent_factory: AgentFactory,
+        *,
+        judge: Judge | None = None,
+        evaluator: Callable[[BenchmarkTask, TaskRun], TaskVerdict] = evaluate,
+        run_id_factory: RunIdFactory | None = None,
+    ) -> None:
+        self._agent_factory = agent_factory
+        self._judge = judge
+        self._evaluator = evaluator
+        self._run_id_factory = run_id_factory or _default_run_id
+
+    async def run(
+        self,
+        tasks: list[BenchmarkTask],
+        *,
+        config: dict | None = None,
+        limit: int | None = None,
+        on_progress: Callable[[int, int, TaskVerdict], None] | None = None,
+    ) -> BenchmarkReport:
+        """跑一批任务并汇总。`config["judge"] = N` 时只对**前 N 条**采样裁判（确定性，便于复现）。"""
+        selected = list(tasks)
+        if limit is not None:
+            selected = selected[: max(0, limit)]
+        cfg = dict(config or {})
+        cfg["tasks_total"] = len(selected)
+        if limit is not None:
+            cfg["limit"] = limit
+        judge_limit = max(0, _as_int(cfg.get("judge")))
+
+        runs: list[TaskRun] = []
+        verdicts: list[TaskVerdict] = []
+        for index, task in enumerate(selected):
+            run = await self._run_one(task)
+            verdict = self._evaluator(task, run)
+            if self._judge is not None and index < judge_limit:
+                await self._apply_judge(task, run, verdict)
+            runs.append(run)
+            verdicts.append(verdict)
+            if on_progress is not None:
+                on_progress(index + 1, len(selected), verdict)
+
+        return BenchmarkReport(
+            run_id=self._run_id_factory(cfg),
+            config=cfg,
+            verdicts=verdicts,
+            metrics=summarize(verdicts, runs),
+        )
+
+    # ── 内部 ──
+
+    async def _run_one(self, task: BenchmarkTask) -> TaskRun:
+        run = TaskRun(task=task)
+        try:
+            agent = self._agent_factory()
+            async for event in agent.run_stream(task.task):
+                self._collect(event, run)
+            result = getattr(agent, "last_result", None)
+            if isinstance(result, AgentResult):
+                run.result = result
+            else:
+                run.error = "agent 没有产出 AgentResult"
+        except Exception as e:  # noqa: BLE001 —— 单条任务失败绝不中断整轮评测
+            run.error = f"{type(e).__name__}: {e}"
+        return run
+
+    @staticmethod
+    def _collect(event: Any, run: TaskRun) -> None:
+        kind = getattr(getattr(event, "event_type", None), "value", "")
+        data = getattr(event, "data", None)
+        if not isinstance(data, dict):
+            return
+        if kind == _TOOL_RESULT:
+            run.tool_events.append(
+                ToolEvent(
+                    step=_as_int(data.get("step")),
+                    tool=str(data.get("tool") or ""),
+                    success=bool(data.get("success")),
+                    result_chars=len(str(data.get("result") or "")),
+                )
+            )
+        elif kind == _COMPACTION:
+            run.compactions.append(
+                CompactionEvent(
+                    before=_as_int(data.get("before")),
+                    after=_as_int(data.get("after")),
+                    strategy=str(data.get("strategy") or ""),
+                    summarized=_as_int(data.get("summarized")),
+                    noop=bool(data.get("noop")),
+                    degraded_from=data.get("degraded_from") or None,
+                )
+            )
+
+    async def _apply_judge(
+        self, task: BenchmarkTask, run: TaskRun, verdict: TaskVerdict
+    ) -> None:
+        """裁判失败**绝不影响**规则判分，也绝不记 0 分 —— 只记"未判分 + 原因"。"""
+        if self._judge is None:
+            return
+        answer = ""
+        if run.result is not None and isinstance(run.result.final_answer, str):
+            answer = run.result.final_answer
+        try:
+            scores = await self._judge(task, answer)
+        except Exception as e:  # noqa: BLE001
+            verdict.judge_reason = f"裁判失败：{type(e).__name__}: {e}"
+            return
+        if isinstance(scores, dict):
+            clean = {
+                str(k): v for k, v in scores.items() if isinstance(v, (int, float))
+            }
+            if clean:
+                verdict.judge_scores = clean
+                return
+            verdict.judge_reason = "裁判返回的分数不可解析"
+            return
+        verdict.judge_reason = "裁判没有返回可用分数"
