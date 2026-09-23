@@ -145,19 +145,39 @@ def test_tool_result_short_text_is_untouched() -> None:
 class _FakeSettings:
     """鸭子类型的 settings：沙箱里装不上 pydantic_settings，装配逻辑必须可注入才能被测试。"""
 
-    llm_api_key = "sk-test"
-    llm_base_url = "http://localhost"
-    llm_model = "test-model"
-    llm_temperature = 0.0
-    llm_max_tokens = 8192
-    agent_max_steps = 3
-    agent_skill_top_k = 1
-    skills_dir = "skills"
-    github_token = ""
-    web_search_provider = "duckduckgo"
-    web_search_api_key = ""
-    tool_http_timeout_seconds = 1.0
-    tool_max_chars = 1000
+    def __init__(self, **overrides: object) -> None:
+        self.llm_api_key = "sk-test"
+        self.llm_base_url = "http://localhost"
+        self.llm_model = "test-model"
+        self.llm_temperature = 0.0
+        self.llm_max_tokens = 8192
+        self.agent_max_steps = 3
+        self.agent_skill_top_k = 1
+        self.skills_dir = "skills"
+        self.github_token = ""
+        self.web_search_provider = "duckduckgo"
+        self.web_search_api_key = ""
+        self.tool_http_timeout_seconds = 1.0
+        self.tool_max_chars = 1000
+        # 记忆层（默认值与 `Settings` 一致：全关）
+        self.memory_short_term_enabled = False
+        self.memory_long_term_enabled = False
+        self.memory_consolidate_enabled = False
+        self.memory_recall_top_k = 3
+        self.memory_inject_max_chars = 500
+        self.memory_short_term_ttl_seconds = 86400
+        self.memory_short_term_max_items = 200
+        self.memory_embedding_dim = 1024
+        self.redis_url = "redis://localhost:6379/0"
+        self.database_url = "postgresql+asyncpg://localhost/agent"
+        self.embedding_api_key = ""
+        self.embedding_base_url = "http://localhost/v1"
+        self.embedding_model = "test-embed"
+        self.judge_llm_api_key = ""
+        self.judge_llm_base_url = ""
+        self.judge_llm_model = "test-judge"
+        for key, value in overrides.items():
+            setattr(self, key, value)
 
 
 def test_demo_task_matches_a_builtin_skill() -> None:
@@ -282,6 +302,67 @@ def test_main_accepts_session_id_flag() -> None:
         raise unittest.SkipTest("依赖齐备：该用例只在缺依赖时验证 argparse 通路")
     code = module.main(["--repo", "octocat/Hello-World", "--session-id", "smoke-1"])
     assert code == 2, "参数应被 argparse 接受（缺依赖时以退出码 2 可读结束）"
+
+
+# ── Demo 1 的记忆层装配（本机实测"Redis 里一条都没有"暴露出的漏装配）──
+#
+# 症状：`--session-id my-test` 跑完，`session:my-test:*` 在 Redis 里不存在，召回也永远为空。
+# 根因**不是** session_id 没传（run → run_stream(task, session_id=...) 那条链路是通的），
+# 而是 `build_agent()` 自己拼了个 `MemoryManager(working=WorkingMemory())` —— 没有任何持久层，
+# 于是 store 只落进进程内 working 层，recall 也自然拿不到东西。API 用的是
+# `deps.get_memory_manager()` 那套真装配，两边漂移。与 Phase 3 的 skill_router 漏装配同一类：
+# 修法不是"给脚本补一行"，而是**装配只有一处**（`infrastructure/memory/catalog.py`）。
+
+
+def test_build_agent_wires_real_memory_layers() -> None:
+    """核心回归：Demo 1 必须装配**真的**短时记忆层，否则 `--session-id` 写了也读不到。"""
+    from agent_runtime.core.llm.types import LLMResponse
+    from agent_runtime.infrastructure.llm.mock import MockLLMProvider
+    from agent_runtime.infrastructure.memory.short_term import RedisShortTermMemory
+
+    module = _load()
+    agent = module.build_agent(
+        settings=_FakeSettings(memory_short_term_enabled=True),
+        llm=MockLLMProvider([LLMResponse(content="报告")]),
+    )
+    assert isinstance(agent.memory.short_term, RedisShortTermMemory), (
+        "build_agent 漏装短时记忆层：与 API 的装配漂移，session 写了也读不到"
+    )
+    assert agent.memory.long_term is None, "没开长期记忆就不该建层"
+
+
+def test_build_agent_uses_the_same_catalog_as_the_api() -> None:
+    """装配必须与 API **同源**：同一条 settings 经两处装配应得到同样的层。
+
+    这条测试的价值在于防止"脚本又自己拼一套"回归 —— 之前正是这么漂移的。
+    """
+    from agent_runtime.core.llm.types import LLMResponse
+    from agent_runtime.infrastructure.llm.mock import MockLLMProvider
+    from agent_runtime.infrastructure.memory.catalog import build_memory_manager
+
+    module = _load()
+    settings = _FakeSettings(memory_short_term_enabled=True)
+    agent = module.build_agent(
+        settings=settings, llm=MockLLMProvider([LLMResponse(content="报告")])
+    )
+    expected, _ = build_memory_manager(settings)
+    assert type(agent.memory.short_term) is type(expected.short_term)
+
+
+def test_format_memory_errors_is_empty_when_clean() -> None:
+    module = _load()
+    assert module.format_memory_errors([]) == ""
+    assert module.format_memory_errors(None) == ""
+
+
+def test_format_memory_errors_marks_each_problem() -> None:
+    """装配问题必须**看得见**：本项目已经两次栽在"机制做了但展示层藏起来"。"""
+    module = _load()
+    text = module.format_memory_errors(
+        ["MEMORY_LONG_TERM_ENABLED=true 但缺少 EMBEDDING_API_KEY：已跳过长期记忆层"]
+    )
+    assert "⚠" in text
+    assert "EMBEDDING_API_KEY" in text
 
 
 def _run_all() -> None:

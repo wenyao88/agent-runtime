@@ -104,6 +104,11 @@ python scripts/run_demo_mock.py
 
 Demo 1 的任务结束会把 `task/answer` 摘要写入已启用的记忆层。打开开关后可用会话标识隔离：
 
+> **2026-09-21 修复（漏装配）**：此前 `build_agent()` 自己拼了一个**没有持久层**的 `MemoryManager(working=WorkingMemory())`，
+> 与 API 的装配（`deps.get_memory_manager()`）漂移 —— 于是 `--session-id` 传对了、开关也打开了，Redis 里却一条都没有、
+> 召回永远为空。现在两边共用 `infrastructure/memory/catalog.py::build_memory_manager`，**装配只有一处**；
+> 装配失败会打印 `⚠ 记忆层问题：…`（如 `MEMORY_LONG_TERM_ENABLED=true` 却缺 `EMBEDDING_API_KEY`），而不是静默降级。
+
 ```bash
 # .env 里打开（默认全关：没起 DB/Redis 也不影响运行）
 #   MEMORY_SHORT_TERM_ENABLED=true

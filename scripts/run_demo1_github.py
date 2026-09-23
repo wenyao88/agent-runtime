@@ -71,6 +71,18 @@ def format_skills(skills_used: object) -> str:
     return f"🎯 命中技能：{', '.join(names)}"
 
 
+def format_memory_errors(errors: object) -> str:
+    """记忆层装配问题的可视化一行；没有问题就返回空串。
+
+    与 `format_warning` / `format_skills` 同理：本项目已经两次栽在"机制做了、展示层藏起来"。
+    这次也一样 —— "记忆层根本没装上"在输出里完全没痕迹，才拖到本机实测才发现。
+    """
+    items = [str(e) for e in (errors or [])]
+    if not items:
+        return ""
+    return "⚠ 记忆层问题：" + "；".join(items)
+
+
 def format_summary(result: object) -> str:
     """收尾摘要：步数 / token / 耗时 / trace / **命中技能**，以及**告警**（有就必须出现）。"""
     steps = len(getattr(result, "steps", None) or [])
@@ -134,10 +146,9 @@ def build_agent(settings: object | None = None, llm: object | None = None):
     from agent_runtime.core.agent.react import ReActLoop
     from agent_runtime.core.context.budget import TokenBudget
     from agent_runtime.core.context.manager import ContextManager
-    from agent_runtime.core.memory.manager import MemoryManager
-    from agent_runtime.core.memory.working import WorkingMemory
     from agent_runtime.core.tool.registry import ToolRegistry
     from agent_runtime.core.trace.tracer import Tracer
+    from agent_runtime.infrastructure.memory.catalog import build_memory_manager
     from agent_runtime.infrastructure.tools.catalog import register_native_tools
 
     if settings is None:
@@ -172,13 +183,20 @@ def build_agent(settings: object | None = None, llm: object | None = None):
             temperature=settings.llm_temperature,
         )
 
+    # 记忆层装配与 API **同源**（infrastructure/memory/catalog.py）：
+    # 之前这里自己拼了个没有持久层的空壳 manager —— 于是 `--session-id` 写了也读不到。
+    memory_manager, memory_errors = build_memory_manager(settings)
+    rendered = format_memory_errors(memory_errors)
+    if rendered:
+        print(rendered)
+
     return ReActLoop(
         llm=llm,
         tool_registry=registry,
         context_manager=ContextManager(
             budget=TokenBudget(model_max_tokens=settings.llm_max_tokens)
         ),
-        memory_manager=MemoryManager(working=WorkingMemory()),
+        memory_manager=memory_manager,
         skill_router=build_skill_router(settings),
         skill_top_k=int(getattr(settings, "agent_skill_top_k", 1)),
         tracer=Tracer(),
