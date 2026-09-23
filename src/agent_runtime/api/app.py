@@ -79,6 +79,7 @@ def create_app() -> FastAPI:
     async def health():
         return {"status": "ok"}
 
+    from .routes.benchmarks import router as benchmarks_router
     from .routes.chat import router as chat_router
     from .routes.memories import router as memories_router
     from .routes.skills import router as skills_router
@@ -89,6 +90,7 @@ def create_app() -> FastAPI:
     app.include_router(tools_router)
     app.include_router(skills_router)
     app.include_router(memories_router)
+    app.include_router(benchmarks_router)
     app.include_router(ws_router)
 
     return app

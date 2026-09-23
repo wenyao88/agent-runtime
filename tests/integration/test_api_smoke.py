@@ -88,6 +88,9 @@ def test_chat_and_ws_smoke() -> None:
     settings = deps_mod.get_settings()
     original_mcp_file = settings.mcp_servers_file
     settings.mcp_servers_file = "/definitely/not/here.json"
+    # 报告落到一次性目录：既不污染仓库，也让"历史为空"的断言可复现
+    original_runs_dir = settings.benchmark_runs_dir
+    settings.benchmark_runs_dir = str(_PROJECT_ROOT / ".testtmp" / "bench_api_smoke")
 
     import agent_runtime.api.ws.agent as ws_mod
 
@@ -137,6 +140,34 @@ def test_chat_and_ws_smoke() -> None:
             assert app.state.memory_errors == [], app.state.memory_errors
             assert app.state.context_errors == [], app.state.context_errors
 
+            # ── REST: /api/benchmarks（空目录 → count 0；未知 run_id → 404）──
+            bench = client.get("/api/benchmarks")
+            assert bench.status_code == 200, bench.text
+            assert bench.json()["count"] == 0, bench.json()
+            assert client.get("/api/benchmarks/nope").status_code == 404
+
+            # ── REST: POST /api/benchmarks/run（mock：后台跑 1 条，轮询取结果）──
+            started = client.post(
+                "/api/benchmarks/run", json={"provider": "mock", "limit": 1}
+            )
+            assert started.status_code == 200, started.text
+            started_body = started.json()
+            assert started_body["started"] is True, started_body
+            assert started_body["run_id"], started_body
+
+            import time
+
+            detail = None
+            for _ in range(50):  # 最多等 5 秒：1 条 mock 任务是毫秒级的
+                resp = client.get(f"/api/benchmarks/{started_body['run_id']}")
+                if resp.status_code == 200:
+                    detail = resp.json()
+                    break
+                time.sleep(0.1)
+            assert detail is not None, "后台评测没在 5 秒内产出报告"
+            assert detail["config"]["provider"] == "mock"
+            assert detail["metrics"]["tasks_total"] == 1
+
             # ── REST: DELETE /api/memories ──
             del_resp = client.delete("/api/memories")
             assert del_resp.status_code == 200, del_resp.text
@@ -163,6 +194,7 @@ def test_chat_and_ws_smoke() -> None:
     finally:
         ws_mod.get_agent = original_ws_get_agent
         settings.mcp_servers_file = original_mcp_file
+        settings.benchmark_runs_dir = original_runs_dir
         app.dependency_overrides.clear()
 
     print("PASS test_chat_and_ws_smoke")

@@ -152,3 +152,82 @@ def get_agent(llm=None) -> ReActLoop:
 def get_agent_dep() -> ReActLoop:
     """FastAPI 依赖包装：无参数签名，避免 get_agent 的 llm 形参被解析成 query param。"""
     return get_agent()
+
+
+# ── Benchmark（Phase 6）──
+
+_BENCHMARK_TASKS: set = set()
+"""后台评测任务的强引用：`asyncio.create_task` 的返回值不持有就会被 GC 掉。"""
+
+
+def _benchmark_paths() -> tuple[str, str]:
+    from agent_runtime.infrastructure.benchmark.catalog import (
+        resolve_runs_dir,
+        resolve_tasks_file,
+    )
+
+    settings = get_settings()
+    return (
+        resolve_tasks_file(settings, str(_PROJECT_ROOT)),
+        resolve_runs_dir(settings, str(_PROJECT_ROOT)),
+    )
+
+
+def list_benchmark_runs() -> list[dict]:
+    from agent_runtime.infrastructure.benchmark.store import list_runs
+
+    _, runs_dir = _benchmark_paths()
+    return list_runs(runs_dir)
+
+
+def load_benchmark_report(run_id: str):
+    from agent_runtime.infrastructure.benchmark.store import load_report
+
+    _, runs_dir = _benchmark_paths()
+    return load_report(run_id, runs_dir)
+
+
+def start_benchmark_run(
+    *, provider: str = "mock", limit: int | None = None, judge: int = 0
+) -> dict:
+    """起一次后台评测，立即返回 run_id。任务集读不到时如实返回 `started: False` + 原因。"""
+    import asyncio
+
+    from agent_runtime.core.benchmark.dataset import load_tasks
+    from agent_runtime.infrastructure.benchmark.catalog import build_runner
+    from agent_runtime.infrastructure.benchmark.service import new_run_id, run_and_save
+
+    settings = get_settings()
+    tasks_file, runs_dir = _benchmark_paths()
+    tasks, errors = load_tasks(tasks_file)
+    run_id = new_run_id(provider)
+    if not tasks:
+        return {
+            "run_id": run_id,
+            "started": False,
+            "errors": errors or [f"任务集为空：{tasks_file}"],
+        }
+
+    # 真实 provider 复用 API 自己的装配（api 可以 import 自己）；mock 用离线假 agent
+    agent_factory = None if provider == "mock" else get_agent
+    runner, build_errors = build_runner(
+        settings, provider, agent_factory=agent_factory
+    )
+    config = {
+        "provider": provider,
+        "model": "mock" if provider == "mock" else settings.llm_model,
+        "judge": max(0, int(judge)),
+    }
+    task = asyncio.create_task(
+        run_and_save(
+            runner,
+            tasks,
+            runs_dir=runs_dir,
+            config=config,
+            limit=limit,
+            run_id=run_id,
+        )
+    )
+    _BENCHMARK_TASKS.add(task)
+    task.add_done_callback(_BENCHMARK_TASKS.discard)
+    return {"run_id": run_id, "started": True, "errors": list(errors) + list(build_errors)}
