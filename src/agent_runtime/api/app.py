@@ -54,7 +54,8 @@ def create_app() -> FastAPI:
         except Exception as e:  # noqa: BLE001 —— 记忆是可选能力，永不阻断启动
             app.state.memory_errors = [f"memory 装配异常：{type(e).__name__}: {e}"]
 
-        # 上下文：只装配压缩摘要器（默认关，单例由 deps 管）。缺 key/缺依赖只记错误。
+        # 上下文：装配压缩摘要器（默认关）。注意 `deps.get_context_manager()` **没有缓存**，
+        # 每次调用都会新建（与 Phase 4 行为一致，本阶段不改生命周期语义）；缺 key/缺依赖只记错误。
         try:
             get_context_manager()
             app.state.context_errors = get_context_errors()

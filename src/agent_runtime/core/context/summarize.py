@@ -71,6 +71,7 @@ def render_for_summary(
     kept: list[str] = []
     used = 0
     for block in reversed(blocks):  # 从最近的消息往回取
+        # 第一条（最近的）无条件收下：宁可略超上限，也不要返回空素材
         if kept and used + len(block) + 1 > max_total_chars:
             break
         kept.append(block)

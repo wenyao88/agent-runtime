@@ -30,6 +30,7 @@ class _FakeSettings:
         self.judge_llm_model = "judge-model"
         self.llm_api_key = ""
         self.llm_base_url = "http://main/v1"
+        self.tool_http_timeout_seconds = 20.0
         for key, value in overrides.items():
             setattr(self, key, value)
 
@@ -62,7 +63,10 @@ def test_no_key_returns_none_and_never_builds_a_provider() -> None:
 
 
 def test_judge_settings_win_and_temperature_is_zero() -> None:
-    """摘要要的是**稳定复现**，不是创意：temperature 必须钉在 0。"""
+    """摘要要的是**稳定复现**，不是创意：temperature 必须钉在 0。
+
+    超时也必须跟随工具配置（默认 60s 会让任务中途卡到 60 秒）。
+    """
     built: list[dict] = []
     settings = _FakeSettings(
         judge_llm_api_key="sk-judge",
@@ -76,6 +80,7 @@ def test_judge_settings_win_and_temperature_is_zero() -> None:
         "base_url": "http://judge/v1",
         "model": "judge-model",
         "temperature": 0.0,
+        "timeout": 20.0,
     }
 
 

@@ -40,6 +40,8 @@ def build_summarizer(
         base_url=settings.judge_llm_base_url or settings.llm_base_url,
         model=settings.judge_llm_model,
         temperature=0.0,
+        # 这次调用发生在**任务中途**：默认 60s 会让一步卡到 60 秒，跟随工具超时配置
+        timeout=float(getattr(settings, "tool_http_timeout_seconds", 60.0)),
     )
 
     async def summarize(text: str) -> str:
