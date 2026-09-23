@@ -241,6 +241,64 @@ def test_judge_returning_junk_is_reported_not_scored() -> None:
     assert "没有返回可用分数" in report.verdicts[0].judge_reason
 
 
+def test_each_task_gets_its_own_memory_session() -> None:
+    """回归（审查 I1）：不传 session_id 会全部落到 `default`。
+
+    memory 开着时（`get_memory_manager()` 是进程单例、working 层按会话累积），
+    上一条任务的记忆会被下一条召回 —— "逐任务隔离"就成了空话。
+    """
+    seen: list[str] = []
+
+    class _Agent:
+        last_result = _result()
+
+        async def run_stream(self, task: str, session_id: str = ""):
+            seen.append(session_id)
+            if False:
+                yield None
+
+    asyncio.run(
+        BenchmarkRunner(lambda task: _Agent(), run_id_factory=lambda cfg: "run-7").run(
+            [_task("a"), _task("b")]
+        )
+    )
+    assert seen == ["bench-run-7-a", "bench-run-7-b"], seen
+
+
+def test_judge_scores_are_validated_at_the_runner_boundary() -> None:
+    """回归（审查 I5）：自定义 judge 返回 bool / 越界分数时，runner 边界也要拦住。
+
+    `bool` 是 `int` 的子类，`True` 会被算成 1 分；99 分更是直接把均分拉爆。
+    """
+
+    async def sloppy(task: BenchmarkTask, answer: str):
+        return {"completion": True, "accuracy": 99, "citation": 3}
+
+    report = asyncio.run(
+        BenchmarkRunner(
+            lambda task: _FakeAgent([], _result()),
+            judge=sloppy,
+            run_id_factory=lambda cfg: "r",
+        ).run([_task("a")], config={"judge": 1})
+    )
+    assert report.verdicts[0].judge_scores == {"citation": 3}
+    assert report.metrics.avg_judge_score == 3.0
+
+
+def test_a_raising_evaluator_does_not_abort_the_run() -> None:
+    def boom(task: BenchmarkTask, run) -> None:
+        raise RuntimeError("评测器炸了")
+
+    runner = BenchmarkRunner(
+        lambda task: _FakeAgent([], _result()), evaluator=boom, run_id_factory=lambda cfg: "r"
+    )
+    report = asyncio.run(runner.run([_task("a"), _task("b")]))
+    assert [v.task_id for v in report.verdicts] == ["a", "b"]
+    assert all("评测器异常" in v.error for v in report.verdicts), [
+        v.error for v in report.verdicts
+    ]
+
+
 def _run_all() -> None:
     failed: list[str] = []
     tests = [

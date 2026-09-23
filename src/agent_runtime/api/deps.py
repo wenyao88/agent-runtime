@@ -194,7 +194,10 @@ def start_benchmark_run(
     import asyncio
 
     from agent_runtime.core.benchmark.dataset import load_tasks
-    from agent_runtime.infrastructure.benchmark.catalog import build_runner
+    from agent_runtime.infrastructure.benchmark.catalog import (
+        build_runner,
+        real_agent_factory,
+    )
     from agent_runtime.infrastructure.benchmark.service import new_run_id, run_and_save
 
     settings = get_settings()
@@ -208,8 +211,10 @@ def start_benchmark_run(
             "errors": errors or [f"任务集为空：{tasks_file}"],
         }
 
-    # 真实 provider 复用 API 自己的装配（api 可以 import 自己）；mock 用离线假 agent
-    agent_factory = None if provider == "mock" else get_agent
+    # 真实 provider 复用 API 自己的装配（api 可以 import 自己）；mock 用离线假 agent。
+    # 注意必须经 `real_agent_factory` 包一层：`get_agent(llm=None)` 的第一个形参是 llm，
+    # 直接传 `get_agent` 会让 runner 的 `factory(task)` 把 task 塞进 llm —— 见 catalog 里那段注释。
+    agent_factory = None if provider == "mock" else real_agent_factory(get_agent)
     runner, build_errors = build_runner(
         settings, provider, agent_factory=agent_factory
     )

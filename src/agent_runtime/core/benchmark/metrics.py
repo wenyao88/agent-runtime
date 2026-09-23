@@ -52,9 +52,13 @@ def summarize(
         sum(v.arg_hits for v in verdicts), sum(v.arg_expected for v in verdicts)
     )
 
-    metrics.avg_steps = _mean([v.steps for v in verdicts])
-    metrics.avg_total_tokens = _mean([v.total_tokens for v in verdicts])
-    metrics.avg_latency_ms = _mean([v.latency_ms for v in verdicts])
+    # 均值只在**真的产出了结果**的任务上算：崩掉的任务是"没测"，不是"0 步 0 token"
+    # （`TaskVerdict.error` 的含义就是"这条任务没能产出结果"）
+    measured = [v for v in verdicts if not v.error]
+    metrics.tasks_errored = len(verdicts) - len(measured)
+    metrics.avg_steps = _mean([v.steps for v in measured])
+    metrics.avg_total_tokens = _mean([v.total_tokens for v in measured])
+    metrics.avg_latency_ms = _mean([v.latency_ms for v in measured])
 
     # 压缩比来自事件流（`AgentResult` 里没有压缩信息）
     all_events = [e for run in runs for e in run.compactions]
@@ -72,6 +76,7 @@ def summarize(
         run.task.task_id
         for run in runs
         if any(not e.success for e in run.tool_events)
+        and run.task.task_id in success_by_id  # 没有对应判分的孤儿运行不算进分母
     ]
     metrics.error_recovery_rate = _rate(
         sum(1 for tid in failing if success_by_id.get(tid)), len(failing)

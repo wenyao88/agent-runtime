@@ -27,11 +27,34 @@ from .models import (
 
 Judge = Callable[[BenchmarkTask, str], Awaitable[dict | None]]
 AgentFactory = Callable[[BenchmarkTask], Any]
-"""按任务造 agent。**必须接收 task**：离线假 agent 需要知道这条任务要调哪些工具。"""
+"""按任务造 agent。**必须接收 task**：离线假 agent 需要知道这条任务要调哪些工具。
+
+工厂返回的对象必须有：`run_stream(task, session_id="")` 与 `last_result`（跑完后的 `AgentResult`）。
+`last_result` 是**契约的一部分**，不是可选装饰：runner 靠它拿步数/token/耗时（见 `_run_one`）。
+"""
 RunIdFactory = Callable[[dict], str]
 
 _TOOL_RESULT = "tool_result"
 _COMPACTION = "compaction"
+_MAX_JUDGE_SCORE = 5
+
+
+def clean_judge_scores(raw: Any) -> dict[str, int] | None:
+    """裁判分数的**唯一**校验口径：只接受 1~5 的整数，一条都不合法 → `None`。
+
+    `bool` 是 `int` 的子类，必须显式排除（`True` 会被算成 1 分）；超出 1~5 的也丢掉。
+    校验放在这里（core），`infrastructure/benchmark/judge.py` 复用同一个谓词 ——
+    自定义 judge callable 从 runner 边界进来时同样受约束（审查 I5）。
+    """
+    if not isinstance(raw, dict):
+        return None
+    scores: dict[str, int] = {}
+    for key, value in raw.items():
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        if 1 <= value <= _MAX_JUDGE_SCORE:
+            scores[str(key)] = value
+    return scores or None
 
 
 def _default_run_id(config: dict) -> str:
@@ -82,12 +105,18 @@ class BenchmarkRunner:
         if limit is not None:
             cfg["limit"] = limit
         judge_limit = max(0, _as_int(cfg.get("judge")))
+        final_run_id = run_id or self._run_id_factory(cfg)
 
         runs: list[TaskRun] = []
         verdicts: list[TaskVerdict] = []
         for index, task in enumerate(selected):
-            run = await self._run_one(task)
-            verdict = self._evaluator(task, run)
+            run = await self._run_one(task, final_run_id)
+            try:
+                verdict = self._evaluator(task, run)
+            except Exception as e:  # noqa: BLE001 —— 自定义评测器抛异常也不能中断整轮
+                verdict = TaskVerdict(
+                    task_id=task.task_id, error=f"评测器异常：{type(e).__name__}: {e}"
+                )
             if self._judge is not None and index < judge_limit:
                 await self._apply_judge(task, run, verdict)
             runs.append(run)
@@ -96,7 +125,7 @@ class BenchmarkRunner:
                 on_progress(index + 1, len(selected), verdict)
 
         return BenchmarkReport(
-            run_id=run_id or self._run_id_factory(cfg),
+            run_id=final_run_id,
             config=cfg,
             verdicts=verdicts,
             metrics=summarize(verdicts, runs),
@@ -104,11 +133,23 @@ class BenchmarkRunner:
 
     # ── 内部 ──
 
-    async def _run_one(self, task: BenchmarkTask) -> TaskRun:
+    @staticmethod
+    def _session_id(run_id: str, task: BenchmarkTask) -> str:
+        """每条任务一个**独立会话**。
+
+        不传 session_id 会全部落到 `default`，而 memory 的 working/short_term 是按会话组织、
+        且 `get_memory_manager()` 是进程单例 —— 于是开着记忆时，上一条任务的记忆会被下一条召回，
+        "逐任务隔离"就成了空话（审查 I1）。
+        """
+        return f"bench-{run_id}-{task.task_id}"
+
+    async def _run_one(self, task: BenchmarkTask, run_id: str) -> TaskRun:
         run = TaskRun(task=task)
         try:
             agent = self._agent_factory(task)
-            async for event in agent.run_stream(task.task):
+            async for event in agent.run_stream(
+                task.task, session_id=self._session_id(run_id, task)
+            ):
                 self._collect(event, run)
             result = getattr(agent, "last_result", None)
             if isinstance(result, AgentResult):
@@ -161,12 +202,10 @@ class BenchmarkRunner:
             verdict.judge_reason = f"裁判失败：{type(e).__name__}: {e}"
             return
         if isinstance(scores, dict):
-            clean = {
-                str(k): v for k, v in scores.items() if isinstance(v, (int, float))
-            }
+            clean = clean_judge_scores(scores)
             if clean:
                 verdict.judge_scores = clean
                 return
-            verdict.judge_reason = "裁判返回的分数不可解析"
+            verdict.judge_reason = "裁判返回的分数不可解析（只认 1~5 的整数）"
             return
         verdict.judge_reason = "裁判没有返回可用分数"

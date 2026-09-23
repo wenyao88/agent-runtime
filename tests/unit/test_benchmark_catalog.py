@@ -20,6 +20,7 @@ from agent_runtime.core.benchmark.models import BenchmarkTask  # noqa: E402
 from agent_runtime.infrastructure.benchmark.catalog import (  # noqa: E402
     MOCK_PROVIDER,
     build_runner,
+    real_agent_factory,
     resolve_runs_dir,
     resolve_tasks_file,
 )
@@ -169,6 +170,24 @@ def test_absolute_paths_are_kept() -> None:
     resolved = Path(resolve_tasks_file(settings, str(_ROOT)))
     assert resolved.is_absolute()
     assert resolved == Path("D:/elsewhere/tasks.json")
+
+
+def test_real_agent_factory_does_not_pass_the_task_as_the_llm() -> None:
+    """回归（审查 C1）：`get_agent(llm=None)` 的第一个形参是 llm。
+
+    直接把 `get_agent` 当工厂用会让 runner 的 `factory(task)` 把 **BenchmarkTask 当成模型** ——
+    每条任务都以 `AttributeError: ... has no attribute 'chat'` 失败，却落出一份
+    "成功率 0%"、**看起来像真实成绩**的报告（本机探针实测复现）。
+    """
+    calls: list[tuple] = []
+
+    def fake_get_agent(*args: object, **kwargs: object) -> str:
+        calls.append((args, kwargs))
+        return "agent"
+
+    factory = real_agent_factory(fake_get_agent)
+    assert factory(BenchmarkTask(task_id="t", task="做事")) == "agent"
+    assert calls == [((), {})], "必须无参调用 get_agent（绝不能把 task 塞进 llm 形参）"
 
 
 def _run_all() -> None:

@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ...core.benchmark.models import BenchmarkTask
+from ...core.benchmark.runner import clean_judge_scores
 from ...core.llm.types import Message
 
 Judge = Callable[[BenchmarkTask, str], Awaitable[dict | None]]
@@ -47,14 +48,9 @@ def parse_scores(raw: Any) -> dict[str, int] | None:
         return None
     if not isinstance(data, dict):
         return None
-    scores: dict[str, int] = {}
-    for key in DIMENSIONS:
-        value = data.get(key)
-        if isinstance(value, bool) or not isinstance(value, int):
-            continue
-        if 1 <= value <= MAX_SCORE:
-            scores[key] = value
-    return scores or None
+    # 只挑这四个维度，再用**共享**的严格谓词校验（bool / 越界 / 非整数一律丢掉）
+    picked = {key: data[key] for key in DIMENSIONS if key in data}
+    return clean_judge_scores(picked)
 
 
 def build_judge(settings: Any, *, provider_factory: Any = None) -> Judge | None:

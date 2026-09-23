@@ -49,6 +49,21 @@ def build_runner(
     return BenchmarkRunner(factory, judge=judge), errors
 
 
+def real_agent_factory(get_agent: Any) -> Any:
+    """把 `get_agent` 适配成 benchmark 的 agent 工厂。
+
+    **必须包一层**：`get_agent(llm=None)` 的第一个形参是 llm，而 runner 会用 `factory(task)` 调用它 ——
+    直接把 task 透传就会让 **BenchmarkTask 变成"模型"**：每条任务都以
+    `AttributeError: 'BenchmarkTask' object has no attribute 'chat'` 失败，然后落出一份
+    "成功率 0%"、**看起来像真实成绩**的报告（审查 C1 实测复现）。
+    """
+
+    def factory(_task: Any) -> Any:
+        return get_agent()
+
+    return factory
+
+
 def resolve_tasks_file(settings: Any, project_root: str) -> str:
     """相对路径按**项目根**解析（与 `skills_dir` 同一约定），不按进程 CWD。"""
     raw = str(getattr(settings, "benchmark_tasks_file", "") or "benchmarks/tasks.json")

@@ -7,11 +7,14 @@
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
 from ...core.benchmark.models import BenchmarkReport
 from .store import save_report
+
+_logger = logging.getLogger(__name__)
 
 
 def new_run_id(provider_label: str, *, now: datetime | None = None) -> str:
@@ -37,5 +40,10 @@ async def run_and_save(
     try:
         save_report(report, runs_dir)
     except (OSError, ValueError) as e:
+        # CLI 会打印它；API 路径下报告根本没落盘，所以 `config["save_error"]` 谁也读不到 ——
+        # 必须**打日志**才算"不静默"（审查 I3）
         report.config["save_error"] = f"{type(e).__name__}: {e}"
+        _logger.warning(
+            "benchmark: 报告落盘失败（run_id=%s, dir=%s）：%s", report.run_id, runs_dir, e
+        )
     return report

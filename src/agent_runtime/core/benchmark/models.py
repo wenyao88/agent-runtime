@@ -90,6 +90,10 @@ class BenchmarkMetrics:
     """8 个核心指标。**分母为 0 的一律是 None，不是 0**（0 会被读成"很差"）。"""
 
     tasks_total: int = 0
+    tasks_errored: int = 0
+    """没能产出结果的任务数（异常 / 崩溃）。**均值的分母要把它排除掉** ——
+    否则崩掉的任务会以 0 步 0 token 的形式把均值拉低，等于拿 0 冒充测量值。"""
+
     success_rate: float | None = None
     tool_selection_accuracy: float | None = None
     tool_argument_accuracy: float | None = None

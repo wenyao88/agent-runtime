@@ -107,7 +107,9 @@ def _real_agent_factory():
     except Exception as e:  # noqa: BLE001
         print(f"错误：真实链路需要完整依赖（fastapi / pydantic_settings / openai）：{type(e).__name__}: {e}")
         return None
-    return lambda task: get_agent()
+    from agent_runtime.infrastructure.benchmark.catalog import real_agent_factory
+
+    return real_agent_factory(get_agent)
 
 
 def main(argv: list[str] | None = None) -> int:

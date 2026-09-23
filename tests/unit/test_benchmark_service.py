@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 import sys
 from datetime import datetime
@@ -100,6 +101,34 @@ def test_a_save_failure_does_not_lose_the_report() -> None:
     assert isinstance(report, BenchmarkReport)
     assert report.metrics.tasks_total == 1, "报告本身必须还在"
     assert "ValueError" in report.config["save_error"]
+
+
+def test_a_save_failure_is_logged_not_only_stored() -> None:
+    """回归（审查 I3）：API 路径下报告根本没落盘，`config["save_error"]` 谁也读不到 —— 必须打日志。"""
+    records: list[str] = []
+
+    class _Handler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record.getMessage())
+
+    logger = logging.getLogger("agent_runtime.infrastructure.benchmark.service")
+    handler = _Handler()
+    logger.addHandler(handler)
+    try:
+        runner, _ = build_runner(_FakeSettings(), MOCK_PROVIDER)
+        report = asyncio.run(
+            run_and_save(
+                runner,
+                _tasks(1),
+                runs_dir=str(_new_dir()),
+                config={"provider": MOCK_PROVIDER},
+                run_id="../escape",
+            )
+        )
+    finally:
+        logger.removeHandler(handler)
+    assert "save_error" in report.config
+    assert any("落盘失败" in message for message in records), records
 
 
 def test_runner_receives_the_fixed_run_id() -> None:

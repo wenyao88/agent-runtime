@@ -37,6 +37,7 @@ def _verdict(
     tokens: int = 100,
     latency: int = 10,
     scores: dict | None = None,
+    error: str = "",
 ) -> TaskVerdict:
     return TaskVerdict(
         task_id=task_id,
@@ -48,6 +49,7 @@ def _verdict(
         total_tokens=tokens,
         latency_ms=latency,
         judge_scores=scores,
+        error=error,
     )
 
 
@@ -73,6 +75,7 @@ def _run(
 def test_empty_input_gives_no_metrics_at_all() -> None:
     metrics = summarize([], [])
     assert metrics.tasks_total == 0
+    assert metrics.tasks_errored == 0
     for name in (
         "success_rate",
         "tool_selection_accuracy",
@@ -206,6 +209,30 @@ def test_judge_totals_only_count_judged_tasks() -> None:
     )
     assert metrics.judged_tasks == 2
     assert metrics.avg_judge_score == (4.0 + 4.0) / 2
+
+
+def test_crashed_tasks_do_not_drag_the_averages_to_zero() -> None:
+    """回归（审查 I2）：崩掉的任务带着 0 步 0 token 混进均值 = 拿 0 冒充测量值。"""
+    metrics = summarize(
+        [
+            _verdict("ok", steps=2, tokens=500, latency=900),
+            _verdict("crash", success=False, steps=0, tokens=0, latency=0, error="AttributeError: x"),
+        ],
+        [],
+    )
+    assert metrics.tasks_errored == 1
+    assert metrics.avg_steps == 2.0, metrics.avg_steps
+    assert metrics.avg_total_tokens == 500.0
+    assert metrics.avg_latency_ms == 900.0
+    assert metrics.success_rate == 0.5, "但成功率仍要把崩掉的任务算作失败"
+
+
+def test_all_crashed_gives_none_not_zero() -> None:
+    metrics = summarize([_verdict("crash", success=False, error="boom")], [])
+    assert metrics.tasks_errored == 1
+    assert metrics.avg_steps is None
+    assert metrics.avg_total_tokens is None
+    assert metrics.avg_latency_ms is None
 
 
 def _run_all() -> None:
