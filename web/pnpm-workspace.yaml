@@ -1,0 +1,5 @@
+# pnpm 12 的设置新家（不再读 package.json 里的 "pnpm" 字段）。
+# esbuild 是 vite 的传递依赖，需要跑 postinstall；不批准的话 `pnpm add` 会以
+# ERR_PNPM_IGNORED_BUILDS 失败（Phase 8 装 shadcn 组件时实测踩到）。
+allowBuilds:
+  esbuild: true
