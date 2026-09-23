@@ -88,6 +88,10 @@ python tests/unit/test_react.py
 python tests/unit/test_memory_manager.py
 ```
 
+`tests/unit/**` 全是纯逻辑测试（沙箱里也能跑）；`tests/integration/test_api_smoke.py` 需要 fastapi/httpx，
+没装就自动 SKIP。它会**注入一份固定配置**（不读你的 `.env`），所以你自己开的
+`MEMORY_*` / `TRACE_STORE` 之类开关不会让它红 —— 也不会被它改。
+
 ## HTTP / WebSocket 接口
 
 | 接口 | 说明 |

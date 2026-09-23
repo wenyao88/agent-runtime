@@ -1,11 +1,18 @@
-"""API 冒烟测试：chat + ws 全链路，用 MockLLM 驱动，不需要真实 API Key。
+"""API 冒烟测试：chat + ws + traces/context/benchmark 全链路，用 MockLLM 驱动，不需要真实 API Key。
 
 无 fastapi/httpx 的环境（本沙箱）自动 SKIP 并 exit 0；用户机器上会真实执行。
 两模式：pytest 可收集，也可直接 `python tests/integration/test_api_smoke.py`。
+
+**配置隔离（2026-09-23 修）**：这份用例以前用 `deps.get_settings()`（= 跑它那个人的 `.env`）
+却断言**默认配置**的后果 —— 只要谁开了 `MEMORY_SHORT_TERM_ENABLED=true`，
+`enabled is False` 就挂（用户实测踩到）。集成测试不该依赖跑它的人怎么配，
+所以现在显式构造一份固定配置（`_env_file=None` 不读 `.env`，关键开关逐个钉住）并注入
+`deps.get_settings`。**新增断言时别再去读用户的 .env。**
 """
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -34,7 +41,7 @@ def _build_agent():
     from agent_runtime.core.agent.react import ReActLoop
     from agent_runtime.core.context.budget import TokenBudget
     from agent_runtime.core.context.manager import ContextManager
-    from agent_runtime.core.llm.types import FunctionCall, LLMResponse
+    from agent_runtime.core.llm.types import FunctionCall, LLMResponse, TokenUsage
     from agent_runtime.core.memory.manager import MemoryManager
     from agent_runtime.core.memory.working import WorkingMemory
     from agent_runtime.core.skill.router import SkillRouter
@@ -49,6 +56,8 @@ def _build_agent():
     skills = SkillRouter()
     errors = register_skills_from_dir(skills, str(_PROJECT_ROOT / "skills"))
     assert errors == [], errors
+    # usage 是**夹具编的**（MockLLM 本来不上报 token）：没有它，`/api/traces` 里每步的
+    # `token_usage` 永远是 0，"usage 真的从 ReAct 一路传到 trace 步骤"这条就没有端到端证据。
     llm = MockLLMProvider(
         [
             LLMResponse(
@@ -56,8 +65,12 @@ def _build_agent():
                 tool_calls=[
                     FunctionCall(id="call_1", name="read_file", arguments='{"path": "README.md"}')
                 ],
+                token_usage=TokenUsage(prompt_tokens=30, completion_tokens=12, total_tokens=42),
             ),
-            LLMResponse(content="最终答案：已读取"),
+            LLMResponse(
+                content="最终答案：已读取",
+                token_usage=TokenUsage(prompt_tokens=40, completion_tokens=8, total_tokens=48),
+            ),
         ]
     )
     return ReActLoop(
@@ -75,6 +88,33 @@ def _build_agent():
 TASK = "看看 fastapi/fastapi 的代码结构，并读取 README.md"
 
 
+def _isolated_settings(runs_dir: str):
+    """给集成测试用的**固定**配置：不读用户的 `.env`，关键开关逐个钉死。
+
+    两条理由：
+      * 用例断言的是"默认配置下的可观测后果"（未启用的层报 `enabled:false`、错误列表为空……），
+        一旦跑它的人开了某个开关就不再成立 —— 那是测试的问题，不是产品的问题；
+      * 构造函数传入的值优先级**高于**环境变量，所以连"用户把开关导成 OS 环境变量"也盖得住。
+
+    故意**不**钉 LLM key：本用例用 MockLLM 注入（chat/WS 走 `_build_agent`，
+    `/api/context` 那段走 `deps.get_agent(llm=...)`），一个真实调用都不会发。
+    """
+    from agent_runtime.config.settings import Settings
+
+    return Settings(
+        _env_file=None,  # 关键：不读 .env（pydantic-settings v2 的官方开关）
+        memory_short_term_enabled=False,
+        memory_long_term_enabled=False,
+        memory_consolidate_enabled=False,
+        agent_compaction_summarize_enabled=False,
+        agent_task_planning_enabled=False,
+        skills_dir="skills",
+        mcp_servers_file="/definitely/not/here.json",  # lifespan 照常执行，但不 spawn 任何 server
+        benchmark_runs_dir=runs_dir,  # 每次跑一个全新的空目录（见下）
+        trace_store="memory",
+    )
+
+
 def test_chat_and_ws_smoke() -> None:
     if not _deps_available():
         print("SKIP test_chat_and_ws_smoke (fastapi/httpx not installed)")
@@ -85,16 +125,33 @@ def test_chat_and_ws_smoke() -> None:
     from agent_runtime.api import deps as deps_mod
     from agent_runtime.api.app import app
 
+    # 报告落到**新的一次性目录**：既不污染仓库，也不让"历史为空"依赖上一次跑剩了什么
+    # （以前固定用 `.testtmp/bench_api_smoke`，第二次跑就会看到上次那份报告 → count==0 假失败）
+    isolated = _isolated_settings(tempfile.mkdtemp(prefix="bench_api_smoke_"))
+
+    # ── 顺序很重要：先换配置、清单例，**再**造 agent ──
+    # `_build_agent()` 内部会 `deps.get_trace_store()`；如果先造 agent 再清缓存，
+    # agent 手里会攥着"用用户 .env 装配的那个 store"，而 `/api/traces` 读的是新 store
+    # —— 两次会话写进 A、断言读 B，全挂。
+    original_get_settings = deps_mod.get_settings
+    deps_mod.get_settings = lambda: isolated
+    # 这几个是 lru_cache 单例：本进程里若已被别人装配过，会拿着**旧 settings**不放
+    singletons = (
+        deps_mod.get_tool_registry,
+        deps_mod.get_memory_manager,
+        deps_mod.get_skill_router,
+        deps_mod.get_trace_store,
+    )
+    for cached in singletons:
+        cached.cache_clear()
+
+    # 前置条件：钉住失败要在这里就能看出来，而不是变成后面某条断言的神秘失败
+    assert deps_mod.get_settings().memory_short_term_enabled is False
+    assert deps_mod.get_settings().trace_store == "memory"
+    assert deps_mod.get_settings().benchmark_runs_dir == isolated.benchmark_runs_dir
+
     agent = _build_agent()
     app.dependency_overrides[deps_mod.get_agent_dep] = lambda: agent
-
-    # 把 MCP 配置指向不存在的文件：lifespan 照常执行，但不会 spawn 任何 server
-    settings = deps_mod.get_settings()
-    original_mcp_file = settings.mcp_servers_file
-    settings.mcp_servers_file = "/definitely/not/here.json"
-    # 报告落到一次性目录：既不污染仓库，也让"历史为空"的断言可复现
-    original_runs_dir = settings.benchmark_runs_dir
-    settings.benchmark_runs_dir = str(_PROJECT_ROOT / ".testtmp" / "bench_api_smoke")
 
     import agent_runtime.api.ws.agent as ws_mod
 
@@ -134,12 +191,14 @@ def test_chat_and_ws_smoke() -> None:
             assert github["triggers"], github
             assert app.state.skill_errors == [], app.state.skill_errors
 
-            # ── REST: GET /api/memories（默认全关：未启用层返回 enabled=false，而不是报错）──
+            # ── REST: GET /api/memories（本用例把三层都钉成关：未启用层返回 enabled=false，而不是报错）──
+            # 这里能硬断言"关"是因为 `_isolated_settings` 把开关钉死了 —— 不是假设跑它的人没配。
             mem_resp = client.get("/api/memories")
             assert mem_resp.status_code == 200, mem_resp.text
             mem_body = mem_resp.json()
             assert mem_body["settings"]["short_term"]["enabled"] is False, mem_body
             assert mem_body["settings"]["long_term"]["enabled"] is False, mem_body
+            assert mem_body["enabled"] == {"short_term": False, "long_term": False}, mem_body
             assert mem_body["count"] == 0 and mem_body["memories"] == [], mem_body
             assert app.state.memory_errors == [], app.state.memory_errors
             assert app.state.context_errors == [], app.state.context_errors
@@ -172,7 +231,7 @@ def test_chat_and_ws_smoke() -> None:
             assert detail["config"]["provider"] == "mock"
             assert detail["metrics"]["tasks_total"] == 1
 
-            # ── REST: DELETE /api/memories ──
+            # ── REST: DELETE /api/memories（层没启用：如实回 enabled=false，不是报错）──
             del_resp = client.delete("/api/memories")
             assert del_resp.status_code == 200, del_resp.text
             assert del_resp.json()["cleared"]["short_term"]["enabled"] is False
@@ -197,24 +256,26 @@ def test_chat_and_ws_smoke() -> None:
             ), frames
 
             # ── REST: /api/traces（REST chat 与 WS 两次会话都该落进同一个 store 单例）──
+            # 配置已钉成内存 store，所以这里可以硬断言 store 类型与"装配期错误为空"。
             traces_resp = client.get("/api/traces")
             assert traces_resp.status_code == 200, traces_resp.text
             traces = traces_resp.json()
+            assert traces["settings"]["store"] == "InMemoryTraceStore", traces["settings"]
             assert traces["settings"]["errors"] == [], traces["settings"]
-            assert traces["settings"]["store"] in {
-                "InMemoryTraceStore",
-                "SqliteTraceStore",
-            }, traces["settings"]
             assert traces["count"] >= 2, traces
             assert "events" not in traces["traces"][0], "列表只给小结，不拖明细"
-            assert traces["traces"][0]["source"] == "chat", traces["traces"][0]
+            # 不假设"最新那条一定来自本次运行"：只是找出本次这两条 chat 轨迹
+            chat_traces = [item for item in traces["traces"] if item["source"] == "chat"]
+            assert len(chat_traces) >= 2, traces
 
-            trace_id = traces["traces"][0]["trace_id"]
+            trace_id = chat_traces[0]["trace_id"]
             detail_resp = client.get(f"/api/traces/{trace_id}")
             assert detail_resp.status_code == 200, detail_resp.text
             detail = detail_resp.json()
             assert detail["available"] is True and detail["reason"] == "", detail
             assert detail["trace"]["steps"], detail
+            # 每步 token 现在是真数据（一步 = 一轮），不再是从没写过的 0
+            assert detail["trace"]["steps"][0]["token_usage"]["total_tokens"] > 0, detail["trace"]["steps"][0]
             assert client.get(f"/api/traces/{trace_id}/events").json()["count"] >= 1
 
             # 查不到 → 404 且原因可读（不是 500，也不是空 200）
@@ -225,8 +286,8 @@ def test_chat_and_ws_smoke() -> None:
             # ── REST: GET /api/context（**正面**路径，审查 M6）──
             # 上面两轮会话走的是 dependency_overrides / 打补丁换进去的 agent，**不经过**
             # `deps.get_agent`，所以 `_LAST_CONTEXT` 一直是 None，只测到 available:false 那一半。
-            # 这里用真的 `deps.get_agent(llm=...)` 装配一个 agent 并跑一轮（MockLLM 直接给答案、
-            # 不调工具、不发网络请求），把"最近一次聊天会话的上下文"这条设计**跑出来**验证。
+            # 这里用真的 `deps.get_agent(llm=...)`（配置是本用例钉的那份：记忆全关、摘要关）
+            # 装配一个 agent 并跑一轮 —— MockLLM 直接给答案，不调工具、不发网络请求。
             import asyncio
 
             from agent_runtime.core.llm.types import LLMResponse
@@ -252,8 +313,10 @@ def test_chat_and_ws_smoke() -> None:
             assert app.state.trace_errors == [], app.state.trace_errors
     finally:
         ws_mod.get_agent = original_ws_get_agent
-        settings.mcp_servers_file = original_mcp_file
-        settings.benchmark_runs_dir = original_runs_dir
+        deps_mod.get_settings = original_get_settings
+        # 单例清掉：别把"测试用的那份配置"装配出来的对象留给同进程的其它用例
+        for cached in singletons:
+            cached.cache_clear()
         app.dependency_overrides.clear()
 
     print("PASS test_chat_and_ws_smoke")

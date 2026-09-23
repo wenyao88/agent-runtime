@@ -710,6 +710,31 @@ async def test_compaction_never_orphans_a_tool_result_from_the_same_batch() -> N
     assert messages[-1].role != "tool", [m.role for m in messages]
 
 
+async def test_each_step_carries_the_usage_of_its_own_round():
+    """usage 从 ReAct 一路传到 trace 的步骤上（Phase 8 审查 M2 的端到端那一半）。
+
+    只测 `Tracer` 是不够的：真正把 usage 递过去的是这里的循环。口径是"一步 = 一轮 LLM 调用"，
+    所以第 1 步拿第 1 轮的 usage、第 2 步拿第 2 轮的 —— 一轮里的多个并行工具调用同属一步，不按工具拆。
+    """
+    first = TokenUsage(prompt_tokens=30, completion_tokens=12, total_tokens=42)
+    second = TokenUsage(prompt_tokens=40, completion_tokens=8, total_tokens=48)
+    agent, _ctx, _memory, tracer, root = _setup(
+        [
+            _tc("c1", '{"path": "a.txt"}', usage=first),
+            LLMResponse(content="读完了", token_usage=second),
+        ]
+    )
+    try:
+        await agent.run("读 a.txt")
+        steps = tracer.session.steps
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    assert [s.token_usage.total_tokens for s in steps] == [42, 48], [s.token_usage for s in steps]
+    assert steps[0].tool_call is not None, "第 1 步是工具调用那一步"
+    assert steps[1].thought == "读完了", steps[1]
+
+
 if __name__ == "__main__":
     _failed = []
     for _name, _fn in sorted(globals().items()):
