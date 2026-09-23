@@ -26,7 +26,8 @@ from .models import (
 )
 
 Judge = Callable[[BenchmarkTask, str], Awaitable[dict | None]]
-AgentFactory = Callable[[], Any]
+AgentFactory = Callable[[BenchmarkTask], Any]
+"""按任务造 agent。**必须接收 task**：离线假 agent 需要知道这条任务要调哪些工具。"""
 RunIdFactory = Callable[[dict], str]
 
 _TOOL_RESULT = "tool_result"
@@ -101,7 +102,7 @@ class BenchmarkRunner:
     async def _run_one(self, task: BenchmarkTask) -> TaskRun:
         run = TaskRun(task=task)
         try:
-            agent = self._agent_factory()
+            agent = self._agent_factory(task)
             async for event in agent.run_stream(task.task):
                 self._collect(event, run)
             result = getattr(agent, "last_result", None)

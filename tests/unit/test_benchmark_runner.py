@@ -79,7 +79,7 @@ class _FakeAgent:
 
 
 def _factory(mapping: dict[str, _FakeAgent], built: list[str] | None = None):
-    def factory():
+    def factory(task: BenchmarkTask):
         # 用"还有哪些任务没跑"来挑 agent：调用顺序与任务顺序一致
         index = len(built) if built is not None else 0
         keys = list(mapping)
@@ -119,7 +119,7 @@ def test_irrelevant_events_are_ignored() -> None:
     tasks = [_task("a", required=[])]
     agent = _FakeAgent(_events(tool_result=False), _result(tools=()))
     report = asyncio.run(
-        BenchmarkRunner(lambda: agent, run_id_factory=lambda cfg: "r").run(tasks)
+        BenchmarkRunner(lambda task: agent, run_id_factory=lambda cfg: "r").run(tasks)
     )
     assert report.metrics.compression_ratio is None
     assert report.metrics.error_recovery_rate is None
@@ -145,7 +145,7 @@ def test_a_failing_task_does_not_stop_the_run() -> None:
     tasks = [_task("a"), _task("boom"), _task("c")]
     calls = {"n": 0}
 
-    def factory():
+    def factory(task: BenchmarkTask):
         calls["n"] += 1
         if calls["n"] == 2:
             raise RuntimeError("provider 挂了")
@@ -163,7 +163,7 @@ def test_a_failing_task_does_not_stop_the_run() -> None:
 def test_a_task_without_a_result_is_marked_failed() -> None:
     agent = _FakeAgent([], None)
     report = asyncio.run(
-        BenchmarkRunner(lambda: agent, run_id_factory=lambda cfg: "r").run([_task("a")])
+        BenchmarkRunner(lambda task: agent, run_id_factory=lambda cfg: "r").run([_task("a")])
     )
     verdict = report.verdicts[0]
     assert verdict.success is False
@@ -219,7 +219,7 @@ def test_a_judge_failure_marks_the_task_unjudged_without_stopping() -> None:
 
     report = asyncio.run(
         BenchmarkRunner(
-            lambda: _FakeAgent(_events(), _result()), judge=bad_judge, run_id_factory=lambda cfg: "r"
+            lambda task: _FakeAgent(_events(), _result()), judge=bad_judge, run_id_factory=lambda cfg: "r"
         ).run([_task("a")], config={"judge": 1})
     )
     verdict = report.verdicts[0]
@@ -234,7 +234,7 @@ def test_judge_returning_junk_is_reported_not_scored() -> None:
 
     report = asyncio.run(
         BenchmarkRunner(
-            lambda: _FakeAgent(_events(), _result()), judge=junk_judge, run_id_factory=lambda cfg: "r"
+            lambda task: _FakeAgent(_events(), _result()), judge=junk_judge, run_id_factory=lambda cfg: "r"
         ).run([_task("a")], config={"judge": 1})
     )
     assert report.verdicts[0].judge_scores is None
