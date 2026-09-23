@@ -67,8 +67,13 @@ class BenchmarkRunner:
         config: dict | None = None,
         limit: int | None = None,
         on_progress: Callable[[int, int, TaskVerdict], None] | None = None,
+        run_id: str | None = None,
     ) -> BenchmarkReport:
-        """跑一批任务并汇总。`config["judge"] = N` 时只对**前 N 条**采样裁判（确定性，便于复现）。"""
+        """跑一批任务并汇总。
+
+        `config["judge"] = N` 时只对**前 N 条**采样裁判（确定性，便于复现）。
+        `run_id` 给定时就用它（API 需要先返回 run_id 再后台跑）。
+        """
         selected = list(tasks)
         if limit is not None:
             selected = selected[: max(0, limit)]
@@ -91,7 +96,7 @@ class BenchmarkRunner:
                 on_progress(index + 1, len(selected), verdict)
 
         return BenchmarkReport(
-            run_id=self._run_id_factory(cfg),
+            run_id=run_id or self._run_id_factory(cfg),
             config=cfg,
             verdicts=verdicts,
             metrics=summarize(verdicts, runs),
