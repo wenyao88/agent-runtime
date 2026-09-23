@@ -444,6 +444,79 @@ def test_truncate_never_drops_a_summary_it_just_made() -> None:
     )
 
 
+def test_summarize_never_raises_on_a_non_string_reply() -> None:
+    """审查 C2：摘要器返回非 str 时，`.strip()` 曾在 `compact()` 外抛 AttributeError。"""
+
+    async def bad(text: str):
+        return ["not", "a", "string"]
+
+    async def run():
+        cm = await _built_with_summarizer(1, bad)
+        cm.append(Message(role="assistant", content="旧1"))
+        cm.append(Message(role="assistant", content="最近"))
+        return await cm.compact(strategy=CompactionStrategy.SUMMARIZE)
+
+    result = asyncio.run(run())
+    assert result.strategy is CompactionStrategy.TRUNCATE
+    assert result.degraded_from is CompactionStrategy.SUMMARIZE
+    assert "list" in result.degraded_reason, result.degraded_reason
+    assert result.summarized_messages == 0
+
+
+def test_summarize_keeps_a_task_that_looks_like_a_summary() -> None:
+    """审查 I6：任务正文以摘要标记开头时，真实任务曾被当成摘要删掉（用户可控触发）。"""
+
+    async def run():
+        cm = ContextManager(
+            budget=_tiny_budget(), keep_recent=1, summarizer=_recording_summarizer([])
+        )
+        await cm.build(
+            task="[对话摘要 · 已压缩 3 条早期消息] 这是我真正的任务",
+            system_prompt="system",
+        )
+        cm.append(Message(role="assistant", content="旧"))
+        cm.append(Message(role="assistant", content="最近"))
+        await cm.compact(strategy=CompactionStrategy.SUMMARIZE)
+        return cm.get_messages()
+
+    messages = asyncio.run(run())
+    assert messages[1].content.startswith("[对话摘要"), "当前任务必须原样保留"
+    assert "这是我真正的任务" in messages[1].content
+    assert messages[2].content.startswith(SUMMARY_MARK.format(folded=1))
+
+
+def test_a_tool_result_that_looks_like_a_summary_is_not_pinned() -> None:
+    """审查 Minor #10：紧跟任务后、以标记开头的任意消息，不能被当成"已钉住的摘要"。"""
+
+    async def run():
+        cm = await _built_with_summarizer(1, _recording_summarizer([]))
+        cm.append(
+            Message(
+                role="tool",
+                content=SUMMARY_MARK.format(folded=9) + "\n假摘要",
+                tool_call_id="c1",
+            )
+        )
+        cm.append(Message(role="assistant", content="最近"))
+        result = await cm.compact(strategy=CompactionStrategy.SUMMARIZE)
+        return result, cm.get_messages()
+
+    result, messages = asyncio.run(run())
+    assert result.summarized_messages == 1, "那条 tool 结果应被折叠，而不是被当成摘要钉住"
+    assert not any("假摘要" in (m.content or "") for m in messages)
+
+
+def test_missing_summarizer_is_reported_before_missing_material() -> None:
+    """审查 Minor #8：没摘要器时原因应指向"没配"（可操作），而不是"没素材"。"""
+
+    async def run():
+        cm = await _built(keep_recent=6)
+        return await cm.compact(strategy=CompactionStrategy.SUMMARIZE)
+
+    result = asyncio.run(run())
+    assert "未配置摘要器" in result.degraded_reason, result.degraded_reason
+
+
 def _run_all() -> None:
     tests = [
         v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)

@@ -44,18 +44,12 @@ from .compaction import (
     squeeze_text,
 )
 from .summarize import (
-    SUMMARY_MARK_PREFIX,
     SUMMARY_PROMPT,
     format_summary_message,
     render_for_summary,
 )
 
 Summarizer = Callable[[str], Awaitable[str]]
-
-
-def _is_summary(message: Message) -> bool:
-    """靠标记识别摘要消息（这样它就能被钉在头部，且再次摘要时被并入新摘要）。"""
-    return bool((message.content or "").startswith(SUMMARY_MARK_PREFIX))
 
 
 class ContextManager:
@@ -70,6 +64,9 @@ class ContextManager:
         self._keep_recent = max(0, keep_recent)
         self._memory_max_chars = memory_max_chars
         self._summarizer = summarizer
+        # 已生成的那条摘要（**按对象身份**认得，不按内容前缀 —— 任务或工具结果也可能
+        # 以那个标记开头，按前缀认会把真实内容当摘要删掉）
+        self._pinned_summary: Message | None = None
         self._messages: list[Message] = []
 
     async def build(
@@ -80,6 +77,7 @@ class ContextManager:
         system_prompt: str | None = None,
     ) -> None:
         self._messages = []
+        self._pinned_summary = None
         sys_text = system_prompt or "You are a helpful AI assistant with access to tools."
         if memory_entries:
             # 记忆行带 [来源 · 日期] 标注：模型必须能区分"历史记忆"与"本轮工具结果"。
@@ -123,7 +121,7 @@ class ContextManager:
         # **先试摘要，再丢消息** —— TRUNCATE 一跑，要摘要的素材就没了。
         degraded = False
         if chosen is not CompactionStrategy.TRUNCATE:
-            ok, _ = await self._try_summarize(result)
+            ok = await self._try_summarize(result)
             if ok:
                 result.strategy = CompactionStrategy.SUMMARIZE
                 if not self.should_compact():
@@ -161,7 +159,7 @@ class ContextManager:
             head.append(messages[1])
             rest_start = 2
         rest = messages[rest_start:]
-        if rest and _is_summary(rest[0]):
+        if rest and rest[0] is self._pinned_summary:
             head.append(rest[0])
             rest = rest[1:]
 
@@ -172,23 +170,25 @@ class ContextManager:
         old = rest[: len(rest) - len(keep)]
         return head, old, keep
 
-    async def _try_summarize(self, result: CompactionResult) -> tuple[bool, int]:
+    async def _try_summarize(self, result: CompactionResult) -> bool:
         """把"保留段之外"的早期消息折叠成一条带标记的摘要。**绝不外抛**。
 
         失败原因写进 `result.degraded_reason`，由调用方把策略落回 TRUNCATE。
         """
-        head, old, keep = self._split_old()
-        if not old:
-            result.degraded_reason = "没有可摘要的早期消息"
-            return False, 0
         if self._summarizer is None:
+            # 先报"没配"再报"没素材"：前者更可操作（用户知道该补什么配置）
             result.degraded_reason = (
                 "未配置摘要器（AGENT_COMPACTION_SUMMARIZE_ENABLED 未打开，或缺 JUDGE_LLM key）"
             )
-            return False, 0
+            return False
+
+        head, old, keep = self._split_old()
+        if not old:
+            result.degraded_reason = "没有可摘要的早期消息"
+            return False
 
         # 上一轮的摘要要一并喂进去，否则跨多轮压缩会一层层丢信息
-        previous = head[-1] if head and _is_summary(head[-1]) else None
+        previous = self._pinned_summary
         material = ([previous] if previous else []) + old
         try:
             raw = await self._summarizer(
@@ -196,20 +196,26 @@ class ContextManager:
             )
         except Exception as e:  # noqa: BLE001 —— 摘要失败绝不能让整轮任务炸掉
             result.degraded_reason = f"摘要失败，降级为丢弃：{type(e).__name__}: {e}"
-            return False, 0
+            return False
 
-        text = (raw or "").strip()
+        if not isinstance(raw, str):
+            # 不把非字符串"字符串化"当摘要：那等于往上下文里塞垃圾
+            result.degraded_reason = (
+                f"摘要器返回了非字符串内容（{type(raw).__name__}），已忽略"
+            )
+            return False
+        text = raw.strip()
         if not text:
             result.degraded_reason = "摘要器返回空内容"
-            return False, 0
+            return False
 
-        head = [m for m in head if not _is_summary(m)]
-        head.append(
-            Message(role="user", content=format_summary_message(text, len(old)))
-        )
+        head = [m for m in head if m is not self._pinned_summary]
+        summary = Message(role="user", content=format_summary_message(text, len(old)))
+        self._pinned_summary = summary
+        head.append(summary)
         self._messages = head + keep
         result.summarized_messages = len(old)
-        return True, len(old)
+        return True
 
     def _squeeze(self) -> int:
         """就地压缩 tool 消息的长文本；返回被压缩的条数。"""
