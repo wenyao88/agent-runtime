@@ -1,12 +1,24 @@
 """上下文管理：组装、追加、token 计量、按策略压缩。
 
-压缩的三条不变量（都有测试钉死）：
+压缩的四条不变量（都有测试钉死）：
   1. system prompt 与**当前任务**永不丢弃（spec 优先级 1：任务丢了 Agent 就失去目标）；
   2. 保留段不得以 `role="tool"` 开头 —— 孤立的 tool 结果违反 OpenAI 消息协议约束；
-  3. 显式传入的 strategy 优先于自动选择；SUMMARIZE 在 Phase 5 之前降级为 TRUNCATE，
-     并如实记录 `degraded_from`（不假装做过摘要）。
+  3. 摘要消息一旦生成就**钉在头部**，后续 TRUNCATE 不得丢弃它（那次 LLM 调用不能白烧）；
+  4. 显式传入的 strategy 优先于自动选择；摘要器缺省/失败 → 降级为 TRUNCATE 并如实记录
+     `degraded_from` + `degraded_reason`（不假装做过摘要）。
+
+压缩阶梯（自动模式，Phase 5）：
+
+    ratio >= 0.95 → SUMMARIZE
+    ratio <  0.95 → SQUEEZE，仍超阈值 → SUMMARIZE（有摘要器时）→ 仍超阈值 → TRUNCATE
+
+顺序的理由：**必须在下手丢消息之前决定要不要摘要** —— TRUNCATE 跑完，素材就没了。
+（注：`should_compact()` 的阈值是 available × 0.8，而 SUMMARIZE 档位要 ≥ 0.95，
+所以只把摘要器接上而不改阶梯的话，SUMMARIZE 在自动模式下是死代码。）
 """
 from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
 
 try:
     import tiktoken
@@ -31,6 +43,19 @@ from .compaction import (
     decide_strategy,
     squeeze_text,
 )
+from .summarize import (
+    SUMMARY_MARK_PREFIX,
+    SUMMARY_PROMPT,
+    format_summary_message,
+    render_for_summary,
+)
+
+Summarizer = Callable[[str], Awaitable[str]]
+
+
+def _is_summary(message: Message) -> bool:
+    """靠标记识别摘要消息（这样它就能被钉在头部，且再次摘要时被并入新摘要）。"""
+    return bool((message.content or "").startswith(SUMMARY_MARK_PREFIX))
 
 
 class ContextManager:
@@ -39,10 +64,12 @@ class ContextManager:
         budget: TokenBudget | None = None,
         keep_recent: int = 6,
         memory_max_chars: int = MAX_DEFAULT_CHARS,
+        summarizer: Summarizer | None = None,
     ):
         self._budget = budget or TokenBudget()
         self._keep_recent = max(0, keep_recent)
         self._memory_max_chars = memory_max_chars
+        self._summarizer = summarizer
         self._messages: list[Message] = []
 
     async def build(
@@ -82,38 +109,107 @@ class ContextManager:
 
     async def compact(self, strategy: CompactionStrategy | None = None) -> CompactionResult:
         before = self.token_count()
-
         chosen = strategy or decide_strategy(self.token_ratio())
-        degraded_from: CompactionStrategy | None = None
-        if chosen is CompactionStrategy.SUMMARIZE:
-            # Phase 5 之前没有 summarizer LLM —— 降级，但如实记录降级来源
-            degraded_from = CompactionStrategy.SUMMARIZE
-            chosen = CompactionStrategy.TRUNCATE
+        result = CompactionResult(strategy=chosen, tokens_before=before, tokens_after=before)
 
-        squeezed = 0
-        dropped = 0
         if chosen is CompactionStrategy.SQUEEZE:
-            squeezed = self._squeeze()
-            if strategy is None and self.should_compact():
-                # 自动模式升级：SQUEEZE 压不下去（例如占用主要来自非工具消息）时继续走 TRUNCATE。
-                # 否则 ReActLoop 每步都会再调一次 compact()，而 SQUEEZE 已是空操作 ——
-                # 空转的同时 token 继续增长，最终上下文溢出。
-                dropped = self._truncate()
-                chosen = CompactionStrategy.TRUNCATE
-        else:
-            dropped = self._truncate()
+            result.messages_squeezed = self._squeeze()
+            if strategy is not None or not self.should_compact():
+                # 显式要求 SQUEEZE，或自动模式下压完已经不超了。
+                result.tokens_after = self.token_count()
+                return result
 
-        after = self.token_count()
-        return CompactionResult(
-            strategy=chosen,
-            tokens_before=before,
-            tokens_after=after,
-            messages_dropped=dropped,
-            messages_squeezed=squeezed,
-            degraded_from=degraded_from,
-        )
+        # 显式 TRUNCATE/SUMMARIZE，或自动模式下 SQUEEZE 没压下去：
+        # **先试摘要，再丢消息** —— TRUNCATE 一跑，要摘要的素材就没了。
+        degraded = False
+        if chosen is not CompactionStrategy.TRUNCATE:
+            ok, _ = await self._try_summarize(result)
+            if ok:
+                result.strategy = CompactionStrategy.SUMMARIZE
+                if not self.should_compact():
+                    result.tokens_after = self.token_count()
+                    return result
+            else:
+                result.degraded_from = CompactionStrategy.SUMMARIZE
+                degraded = True
+
+        dropped = self._truncate()
+        result.messages_dropped = dropped
+        if degraded or dropped:
+            # 摘要没做成、或摘要后仍超阈值又丢了一批 → 真正把体积降下来的是 TRUNCATE
+            result.strategy = CompactionStrategy.TRUNCATE
+        result.tokens_after = self.token_count()
+        return result
 
     # ── 内部策略实现 ──
+
+    def _split_old(self) -> tuple[list[Message], list[Message], list[Message]]:
+        """切成 `(head, old, keep)`。
+
+        * `head` = system + 当前任务 + **已生成的摘要**（钉住，TRUNCATE 不得丢弃）
+        * `keep` = 最近 `keep_recent` 条，且不得以孤立的 tool 结果开头
+        * `old`  = 两者之间（含被剔除的孤立 tool 结果）—— 摘要 / 丢弃的唯一候选
+        """
+        messages = self._messages
+        if not messages:
+            return [], [], []
+
+        head = [messages[0]]
+        rest_start = 1
+        if len(messages) > 1 and messages[1].role == "user":
+            # 当前任务与 system 同为"永不过期"（spec 优先级 1）
+            head.append(messages[1])
+            rest_start = 2
+        rest = messages[rest_start:]
+        if rest and _is_summary(rest[0]):
+            head.append(rest[0])
+            rest = rest[1:]
+
+        keep = list(rest[-self._keep_recent :]) if self._keep_recent else []
+        # 不变量：保留段不能以 tool 结果开头（否则就是没有对应 assistant tool_calls 的孤儿消息）
+        while keep and keep[0].role == "tool" and len(keep) < len(rest):
+            keep.pop(0)
+        old = rest[: len(rest) - len(keep)]
+        return head, old, keep
+
+    async def _try_summarize(self, result: CompactionResult) -> tuple[bool, int]:
+        """把"保留段之外"的早期消息折叠成一条带标记的摘要。**绝不外抛**。
+
+        失败原因写进 `result.degraded_reason`，由调用方把策略落回 TRUNCATE。
+        """
+        head, old, keep = self._split_old()
+        if not old:
+            result.degraded_reason = "没有可摘要的早期消息"
+            return False, 0
+        if self._summarizer is None:
+            result.degraded_reason = (
+                "未配置摘要器（AGENT_COMPACTION_SUMMARIZE_ENABLED 未打开，或缺 JUDGE_LLM key）"
+            )
+            return False, 0
+
+        # 上一轮的摘要要一并喂进去，否则跨多轮压缩会一层层丢信息
+        previous = head[-1] if head and _is_summary(head[-1]) else None
+        material = ([previous] if previous else []) + old
+        try:
+            raw = await self._summarizer(
+                SUMMARY_PROMPT.format(text=render_for_summary(material))
+            )
+        except Exception as e:  # noqa: BLE001 —— 摘要失败绝不能让整轮任务炸掉
+            result.degraded_reason = f"摘要失败，降级为丢弃：{type(e).__name__}: {e}"
+            return False, 0
+
+        text = (raw or "").strip()
+        if not text:
+            result.degraded_reason = "摘要器返回空内容"
+            return False, 0
+
+        head = [m for m in head if not _is_summary(m)]
+        head.append(
+            Message(role="user", content=format_summary_message(text, len(old)))
+        )
+        self._messages = head + keep
+        result.summarized_messages = len(old)
+        return True, len(old)
 
     def _squeeze(self) -> int:
         """就地压缩 tool 消息的长文本；返回被压缩的条数。"""
@@ -129,29 +225,10 @@ class ContextManager:
         return squeezed
 
     def _truncate(self) -> int:
-        """丢弃最旧消息（保留 system + 当前任务 + 最近若干条）；返回真实丢弃条数。"""
-        messages = self._messages
-        if len(messages) <= 2:
-            return 0
+        """丢弃最旧消息（保留 head + 最近若干条）；返回真实丢弃条数。
 
-        system = messages[0]
-        task: Message | None = None
-        rest_start = 1
-        if messages[1].role == "user":
-            task = messages[1]
-            rest_start = 2
-        rest = messages[rest_start:]
-
-        keep = list(rest[-self._keep_recent :]) if self._keep_recent else []
-        # 不变量：保留段不能以 tool 结果开头（否则就是没有对应 assistant tool_calls 的孤儿消息）
-        while keep and keep[0].role == "tool" and len(keep) < len(rest):
-            keep.pop(0)
-
-        new_messages = [system]
-        if task is not None:
-            new_messages.append(task)
-        new_messages.extend(keep)
-
-        dropped = len(messages) - len(new_messages)
-        self._messages = new_messages
-        return dropped
+        `messages_dropped` 会进 Trace/Benchmark 报告，必须是**真实条数**而不是 token 差。
+        """
+        head, old, keep = self._split_old()
+        self._messages = head + keep
+        return len(old)

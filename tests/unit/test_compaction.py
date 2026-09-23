@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from agent_runtime.core.context.budget import TokenBudget
 from agent_runtime.core.context.compaction import CompactionStrategy, decide_strategy
 from agent_runtime.core.context.manager import ContextManager
+from agent_runtime.core.context.summarize import SUMMARY_MARK, SUMMARY_MARK_PREFIX
 from agent_runtime.core.llm.types import FunctionCall, Message
 
 
@@ -223,6 +224,224 @@ def test_budget_compaction_ratio_is_configurable() -> None:
     assert tight.compaction_threshold == 50
     default = TokenBudget(model_max_tokens=100, reserved_output=0, safety_margin=1.0)
     assert default.compaction_threshold == 80
+
+
+# ── SUMMARIZE（Phase 5）──
+#
+# 背景：`should_compact()` 的阈值是 available × 0.8，而 SUMMARIZE 档位要 ratio ≥ 0.95 ——
+# 所以"只把摘要器接上"并不够，阶梯必须变成 SQUEEZE → SUMMARIZE → TRUNCATE，
+# 否则 SUMMARIZE 在自动模式下是死代码。以下用例同时钉住阶梯与降级可见性。
+
+_SUMMARY_REPLY = "早期经过：已确认用 github_* 工具"
+
+
+def _recording_summarizer(calls: list[str], reply: str = _SUMMARY_REPLY):
+    async def summarizer(text: str) -> str:
+        calls.append(text)
+        return reply
+
+    return summarizer
+
+
+async def _built_with_summarizer(keep_recent: int, summarizer, budget=None) -> ContextManager:
+    cm = ContextManager(
+        budget=budget or _tiny_budget(), keep_recent=keep_recent, summarizer=summarizer
+    )
+    await cm.build(task="原始任务", system_prompt="system")
+    return cm
+
+
+def test_summarize_folds_old_messages_into_a_marked_summary() -> None:
+    async def run():
+        calls: list[str] = []
+        cm = await _built_with_summarizer(1, _recording_summarizer(calls))
+        cm.append(Message(role="assistant", content="旧1"))
+        cm.append(Message(role="tool", content="旧2", tool_call_id="c1"))
+        cm.append(Message(role="assistant", content="最近"))
+        result = await cm.compact(strategy=CompactionStrategy.SUMMARIZE)
+        return result, cm.get_messages(), calls
+
+    result, messages, calls = asyncio.run(run())
+    assert result.strategy is CompactionStrategy.SUMMARIZE
+    assert result.summarized_messages == 2, "两条早期消息被折叠进摘要"
+    assert result.degraded_from is None
+    assert result.degraded_reason == ""
+    assert len(calls) == 1, "只调用一次摘要模型"
+    assert "旧1" in calls[0] and "旧2" in calls[0], "摘要素材必须是那两条早期消息"
+    contents = [m.content or "" for m in messages]
+    assert not any("旧1" in c for c in contents), "被折叠的原文不该再留在上下文里"
+    assert "最近" in contents[-1], "最近的消息必须原样保留"
+
+
+def test_summarize_inserts_the_summary_right_after_the_task() -> None:
+    async def run():
+        cm = await _built_with_summarizer(1, _recording_summarizer([]))
+        cm.append(Message(role="assistant", content="旧"))
+        cm.append(Message(role="assistant", content="最近"))
+        await cm.compact(strategy=CompactionStrategy.SUMMARIZE)
+        return cm.get_messages()
+
+    messages = asyncio.run(run())
+    assert [m.role for m in messages] == ["system", "user", "user", "assistant"]
+    assert messages[1].content == "原始任务", "当前任务必须还在原位（spec 优先级 1）"
+    assert messages[2].content.startswith(SUMMARY_MARK.format(folded=1))
+    assert _SUMMARY_REPLY in messages[2].content
+    assert messages[2].role == "user", "摘要用 user：中间插 system 有 provider 兼容风险"
+
+
+def test_summarize_failure_degrades_to_truncate_and_says_why() -> None:
+    async def run():
+        async def boom(text: str) -> str:
+            raise RuntimeError("judge llm down")
+
+        cm = await _built_with_summarizer(1, boom)
+        cm.append(Message(role="assistant", content="旧1"))
+        cm.append(Message(role="assistant", content="最近"))
+        result = await cm.compact(strategy=CompactionStrategy.SUMMARIZE)
+        return result, cm.get_messages()
+
+    result, messages = asyncio.run(run())
+    assert result.strategy is CompactionStrategy.TRUNCATE
+    assert result.degraded_from is CompactionStrategy.SUMMARIZE
+    assert "RuntimeError" in result.degraded_reason, "降级原因必须看得出是什么错"
+    assert result.summarized_messages == 0
+    assert not any("旧1" in (m.content or "") for m in messages), "降级后旧消息仍必须被处理掉"
+
+
+def test_summarize_blank_result_degrades_to_truncate() -> None:
+    async def run():
+        async def blank(text: str) -> str:
+            return "   \n "
+
+        cm = await _built_with_summarizer(1, blank)
+        cm.append(Message(role="assistant", content="旧1"))
+        cm.append(Message(role="assistant", content="最近"))
+        return await cm.compact(strategy=CompactionStrategy.SUMMARIZE)
+
+    result = asyncio.run(run())
+    assert result.strategy is CompactionStrategy.TRUNCATE
+    assert result.degraded_from is CompactionStrategy.SUMMARIZE
+    assert "空" in result.degraded_reason
+
+
+def test_summarize_without_summarizer_says_it_is_not_configured() -> None:
+    async def run():
+        cm = await _built(keep_recent=1)
+        cm.append(Message(role="assistant", content="旧1"))
+        cm.append(Message(role="assistant", content="最近"))
+        return await cm.compact(strategy=CompactionStrategy.SUMMARIZE)
+
+    result = asyncio.run(run())
+    assert result.strategy is CompactionStrategy.TRUNCATE
+    assert result.degraded_from is CompactionStrategy.SUMMARIZE
+    assert "未配置" in result.degraded_reason
+
+
+def test_summarize_with_nothing_to_fold_degrades() -> None:
+    async def run():
+        cm = await _built_with_summarizer(6, _recording_summarizer([]))
+        return await cm.compact(strategy=CompactionStrategy.SUMMARIZE)
+
+    result = asyncio.run(run())
+    assert result.strategy is CompactionStrategy.TRUNCATE
+    assert "没有可摘要" in result.degraded_reason
+
+
+def test_summarize_never_keeps_an_orphan_tool_message() -> None:
+    async def run():
+        cm = await _built_with_summarizer(3, _recording_summarizer([]))
+        cm.append(
+            Message(
+                role="assistant",
+                content="a1",
+                tool_calls=[FunctionCall(id="c1", name="t", arguments="{}")],
+            )
+        )
+        cm.append(Message(role="tool", content="r1", tool_call_id="c1"))
+        cm.append(Message(role="tool", content="r2", tool_call_id="c1"))
+        cm.append(Message(role="assistant", content="a3"))
+        await cm.compact(strategy=CompactionStrategy.SUMMARIZE)
+        return cm.get_messages()
+
+    messages = asyncio.run(run())
+    assert messages[0].role == "system"
+    assert messages[2].content.startswith(SUMMARY_MARK.format(folded=3)), (
+        "开头那两条孤立的 tool 结果应被收进摘要，而不是留在保留段里"
+    )
+    assert messages[3].role == "assistant", "保留段不得以孤立 tool 结果开头"
+    assert messages[-1].content == "a3"
+
+
+def test_auto_summarize_is_used_when_a_summarizer_is_available() -> None:
+    """Phase 5 的核心回归：ratio ≥ 0.95 且有摘要器时，必须**真的摘要**（以前一律降级 TRUNCATE）。"""
+
+    async def run():
+        budget = TokenBudget(model_max_tokens=1_000_000, reserved_output=0, safety_margin=1.0)
+        cm = ContextManager(
+            budget=budget, keep_recent=1, summarizer=_recording_summarizer([])
+        )
+        await cm.build(task="任务", system_prompt="system")
+        cm.append(Message(role="assistant", content="旧" * 2000))
+        cm.append(Message(role="assistant", content="最近"))
+        budget.model_max_tokens = max(1, int(cm.token_count() / 0.98))
+        return await cm.compact()
+
+    result = asyncio.run(run())
+    assert result.strategy is CompactionStrategy.SUMMARIZE
+    assert result.degraded_from is None
+    assert result.summarized_messages == 1
+
+
+def test_auto_squeeze_escalates_to_summarize_before_truncate() -> None:
+    """阶梯的核心主张：在**丢消息之前**先试摘要 —— TRUNCATE 一跑，素材就没了。"""
+
+    async def run():
+        budget = TokenBudget(model_max_tokens=1_000_000, reserved_output=0, safety_margin=1.0)
+        cm = ContextManager(
+            budget=budget, keep_recent=1, summarizer=_recording_summarizer([])
+        )
+        await cm.build(task="任务", system_prompt="system")
+        cm.append(Message(role="assistant", content="A" * 20000))  # 非 tool：SQUEEZE 动不了
+        cm.append(Message(role="tool", content="T" * 800, tool_call_id="c1"))
+        cm.append(Message(role="assistant", content="最近"))
+        budget.model_max_tokens = max(1, int(cm.token_count() / 0.85))
+        assert cm.should_compact() is True
+        return await cm.compact()
+
+    result = asyncio.run(run())
+    assert result.messages_squeezed >= 1, "先试最便宜的 SQUEEZE"
+    assert result.strategy is CompactionStrategy.SUMMARIZE, (
+        "SQUEEZE 不够时必须先摘要，而不是直接丢消息"
+    )
+    assert result.summarized_messages >= 1
+
+
+def test_truncate_never_drops_a_summary_it_just_made() -> None:
+    """摘要花了一次 LLM 调用。若随后的 TRUNCATE 把它丢掉，那次调用就白烧了。
+
+    构造：保留窗口**本身**就超阈值 → 摘完仍超 → 升级 TRUNCATE。摘要必须被钉在头部活下来。
+    """
+
+    async def run():
+        budget = TokenBudget(model_max_tokens=1_000_000, reserved_output=0, safety_margin=1.0)
+        cm = ContextManager(
+            budget=budget, keep_recent=1, summarizer=_recording_summarizer([])
+        )
+        await cm.build(task="任务", system_prompt="system")
+        cm.append(Message(role="assistant", content="旧" * 100))
+        cm.append(Message(role="assistant", content="最近" * 20000))
+        budget.model_max_tokens = max(1, int(cm.token_count() / 0.98))
+        result = await cm.compact()
+        return result, cm.get_messages()
+
+    result, messages = asyncio.run(run())
+    assert result.summarized_messages >= 1, "应先摘要"
+    assert any(
+        (m.content or "").startswith(SUMMARY_MARK_PREFIX) for m in messages
+    ), "刚生成的摘要不能被随后的 TRUNCATE 丢掉"
+    assert result.strategy is CompactionStrategy.SUMMARIZE, (
+        "TRUNCATE 无事可丢（摘要已被钉住）→ 真正把体积降下来的是摘要"
+    )
 
 
 def _run_all() -> None:

@@ -31,7 +31,14 @@ class CompactionResult:
     tokens_after: int
     messages_dropped: int = 0
     messages_squeezed: int = 0
+    summarized_messages: int = 0
+    """被折叠进摘要的消息条数；>0 表示**摘要确实发生了**（与 `degraded_from` 是两件事）。"""
+
     degraded_from: CompactionStrategy | None = None
+    """想用某种策略但没用成（例如想摘要却没有摘要器）。"""
+
+    degraded_reason: str = ""
+    """人可读的降级原因。**必须有人读它** —— 静默降级是本项目反复踩的坑。"""
 
     @property
     def saved_tokens(self) -> int:
