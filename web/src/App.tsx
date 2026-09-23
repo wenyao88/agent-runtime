@@ -1,4 +1,5 @@
 import { NavLink, Route, Routes } from "react-router-dom";
+import BenchmarkPage from "./pages/BenchmarkPage";
 import ChatPage from "./pages/ChatPage";
 import TracePage from "./pages/TracePage";
 import InspectorPage from "./pages/InspectorPage";
@@ -22,12 +23,16 @@ export default function App() {
         <NavLink to="/inspector" className={linkClass}>
           Inspector
         </NavLink>
+        <NavLink to="/benchmark" className={linkClass}>
+          Benchmark
+        </NavLink>
       </aside>
       <main className="flex-1 overflow-hidden bg-slate-50">
         <Routes>
           <Route path="/" element={<ChatPage />} />
           <Route path="/trace" element={<TracePage />} />
           <Route path="/inspector" element={<InspectorPage />} />
+          <Route path="/benchmark" element={<BenchmarkPage />} />
         </Routes>
       </main>
     </div>
