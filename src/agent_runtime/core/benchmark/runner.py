@@ -39,6 +39,8 @@ RunIdFactory = Callable[[dict], str]
 _TOOL_RESULT = "tool_result"
 _COMPACTION = "compaction"
 _MAX_JUDGE_SCORE = 5
+ERROR_EXCERPT_CHARS = 200
+"""失败结果只留前 200 字符（进度文件要能自诊断，又不能被长文本撑爆）。"""
 
 
 def clean_judge_scores(raw: Any) -> dict[str, int] | None:
@@ -199,12 +201,16 @@ class BenchmarkRunner:
         if not isinstance(data, dict):
             return
         if kind == _TOOL_RESULT:
+            success = bool(data.get("success"))
+            text = str(data.get("result") or "")
             run.tool_events.append(
                 ToolEvent(
                     step=_as_int(data.get("step")),
                     tool=str(data.get("tool") or ""),
-                    success=bool(data.get("success")),
-                    result_chars=len(str(data.get("result") or "")),
+                    success=success,
+                    result_chars=len(text),
+                    # 失败原因只留片段：进度文件是跑挂之后唯一的现场，长文本不进文件
+                    error_excerpt="" if success else text[:ERROR_EXCERPT_CHARS],
                 )
             )
         elif kind == _COMPACTION:

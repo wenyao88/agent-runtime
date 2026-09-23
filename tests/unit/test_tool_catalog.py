@@ -108,6 +108,54 @@ def test_github_tools_share_the_configured_token() -> None:
     assert tool._token == "ghp_x", "token 应注入到所有 GitHub 工具"
 
 
+# ── 搜索配置的启动校验（真实全量实测：配错了会白烧每条任务的 max_steps） ──
+
+
+class _Settings:
+    def __init__(self, **overrides: object) -> None:
+        self.web_search_provider = "duckduckgo"
+        self.web_search_api_key = ""
+        for key, value in overrides.items():
+            setattr(self, key, value)
+
+
+def test_search_config_is_fine_with_the_keyless_default() -> None:
+    from agent_runtime.infrastructure.tools.catalog import search_config_errors
+
+    assert search_config_errors(_Settings()) == []
+    # 空 provider 走工具自己的默认值（duckduckgo），不算配置错误
+    assert search_config_errors(_Settings(web_search_provider="")) == []
+
+
+def test_search_config_accepts_tavily_with_a_key() -> None:
+    from agent_runtime.infrastructure.tools.catalog import search_config_errors
+
+    assert search_config_errors(
+        _Settings(web_search_provider="tavily", web_search_api_key="tvly-abc")
+    ) == []
+
+
+def test_tavily_without_a_key_is_a_fatal_config_error() -> None:
+    from agent_runtime.infrastructure.tools.catalog import search_config_errors
+
+    errors = search_config_errors(
+        _Settings(web_search_provider="tavily", web_search_api_key="   ")
+    )
+    assert len(errors) == 1
+    assert "WEB_SEARCH_API_KEY" in errors[0]
+    assert "tavily" in errors[0]
+
+
+def test_an_unknown_search_provider_is_a_fatal_config_error() -> None:
+    """拼错的 provider 与"没 key 的 tavily"是同一类问题：每次调用都必然失败。"""
+    from agent_runtime.infrastructure.tools.catalog import search_config_errors
+
+    errors = search_config_errors(_Settings(web_search_provider="tavilyy"))
+    assert len(errors) == 1
+    assert "tavilyy" in errors[0]
+    assert "duckduckgo" in errors[0] and "tavily" in errors[0], "要把可选值列出来"
+
+
 def _run_all() -> None:
     tests = [
         v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)

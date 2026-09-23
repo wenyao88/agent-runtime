@@ -207,6 +207,24 @@ def test_verdict_records_steps_tokens_latency_and_skills() -> None:
     assert verdict.min_steps == 3, "min_steps 只记录不判分（口径见 spec §5 说明）"
 
 
+def test_rounds_are_copied_separately_from_steps() -> None:
+    """`steps` 是工具调用数，`rounds` 是真实 LLM 轮次 —— 两个数必须各报各的。
+
+    真实全量实测：`steps` 显示 31 而 warning 说 `max_steps(15)`，看起来自相矛盾；
+    其实是"15 轮 × 每轮 2 个工具调用 + 1"，所以报告里要把轮次单独给出来。
+    """
+    task = _task()
+    result = _result(
+        [_tool_step(1, "read_file"), _tool_step(2, "read_file"), _final_step(2, "答案")]
+    )
+    result.rounds = 2
+    result.max_steps = 15
+    verdict = evaluate(task, _run(task, result))
+    assert verdict.steps == 3, "三条 AgentStep（两次工具调用 + 最终答案）"
+    assert verdict.rounds == 2, "只走了 2 轮"
+    assert verdict.max_steps == 15
+
+
 def _run_all() -> None:
     failed: list[str] = []
     tests = [

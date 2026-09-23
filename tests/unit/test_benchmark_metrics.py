@@ -74,6 +74,28 @@ def _run(
 # ── 空集与除零 ──
 
 
+def test_avg_rounds_is_reported_next_to_avg_steps() -> None:
+    """`avg_steps` 与 `avg_rounds` 是两个数：只报前者会让人误判"离 max_steps 还有多远"。"""
+    verdicts = [
+        _verdict("a", steps=31, tokens=100),
+        _verdict("b", steps=21, tokens=100),
+    ]
+    verdicts[0].rounds = 15
+    verdicts[1].rounds = 10
+    metrics = summarize(verdicts, [])
+    assert metrics.avg_steps == 26.0
+    assert metrics.avg_rounds == 12.5
+
+
+def test_avg_rounds_ignores_errored_tasks_and_is_none_without_them() -> None:
+    crashed = _verdict("a", error="boom", error_kind="task")
+    crashed.rounds = 15
+    assert summarize([crashed], []).avg_rounds is None
+    ok = _verdict("b", steps=3, tokens=10)
+    ok.rounds = 2
+    assert summarize([ok, crashed], []).avg_rounds == 2.0
+
+
 def test_empty_input_gives_no_metrics_at_all() -> None:
     metrics = summarize([], [])
     assert metrics.tasks_total == 0

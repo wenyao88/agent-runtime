@@ -157,6 +157,33 @@ async def test_max_steps_forced_finish():
         # 最后一次 LLM 调用确实是 forced（不带 tools）
         assert agent.llm.last_tools is None
         assert agent.llm.calls == 3
+        # 轮次 = 循环迭代次数（2），不是 LLM 调用次数（3）也不是步数（3）——
+        # 强制收尾那次额外调用只体现在 warning 里
+        assert result.rounds == 2
+        assert result.max_steps == 2
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_rounds_are_counted_per_llm_turn_not_per_tool_call():
+    """一轮里发多个 tool_calls 时：轮次 1，而 `steps` 有 2 条（真实全量的常见形态）。"""
+    script = [
+        LLMResponse(
+            content=None,
+            tool_calls=[
+                FunctionCall(id="c1", name="read_file", arguments='{"path": "a.txt"}'),
+                FunctionCall(id="c2", name="read_file", arguments='{"path": "a.txt"}'),
+            ],
+        ),
+        LLMResponse(content="最终答案"),
+    ]
+    agent, ctx, memory, tracer, root = _setup(script)
+    try:
+        result = await agent.run("一轮读两次")
+        assert result.rounds == 2, "两次 llm.chat"
+        assert len(result.steps) == 3, "两条工具调用 + 最终答案"
+        assert result.max_steps == agent.max_steps
+        assert result.warning is None
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

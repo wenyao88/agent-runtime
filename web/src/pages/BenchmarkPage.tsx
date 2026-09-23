@@ -18,6 +18,7 @@ const METRIC_ROWS: { label: string; key: keyof BenchmarkMetrics; kind: Kind }[] 
   { label: "工具选择准确率", key: "tool_selection_accuracy", kind: "pct" },
   { label: "工具参数准确率", key: "tool_argument_accuracy", kind: "pct" },
   { label: "平均步数", key: "avg_steps", kind: "num" },
+  { label: "平均轮次", key: "avg_rounds", kind: "num" },
   { label: "平均 token", key: "avg_total_tokens", kind: "num" },
   { label: "平均耗时(ms)", key: "avg_latency_ms", kind: "num" },
   { label: "压缩比", key: "compression_ratio", kind: "pct" },
@@ -78,7 +79,9 @@ function VerdictList({ report }: { report: BenchmarkReport }) {
             </span>{" "}
             <span className="font-mono text-xs text-slate-700">{v.task_id}</span>
             <span className="ml-2 text-xs text-slate-400">
-              步数 {v.steps} · token {v.total_tokens}
+              步数 {v.steps} · 轮次 {v.rounds ? `${v.rounds}${v.max_steps ? `/${v.max_steps}` : ""}` : "—"}{" "}
+              · token {v.total_tokens}
+              {v.skipped ? " · ↻ 续跑复用" : ""}
             </span>
             {notes.length > 0 && (
               <div className="pl-4 text-xs text-slate-500">{notes.join("；")}</div>

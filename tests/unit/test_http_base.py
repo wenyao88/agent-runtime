@@ -53,6 +53,96 @@ class DummyTool(HttpToolBase):
         return self._ok(outcome.text)
 
 
+class SequenceClient:
+    """按顺序返回预设响应，并记录每次请求的头 —— 用来验证重试与请求头。"""
+
+    def __init__(self, *responses: FakeResponse, exc: Exception | None = None):
+        self._responses = list(responses) or [FakeResponse()]
+        self._exc = exc
+        self.calls = 0
+        self.sent_headers: list[dict] = []
+
+    async def request(self, method: str, url: str, **kw):
+        self.calls += 1
+        self.sent_headers.append(dict(kw.get("headers") or {}))
+        if self._exc is not None:
+            raise self._exc
+        return self._responses[min(self.calls - 1, len(self._responses) - 1)]
+
+
+# ── 请求头：真实站点会按头把裸请求判成机器人（403） ──
+
+
+def test_default_headers_identify_a_real_client_with_a_contact_ua() -> None:
+    client = SequenceClient()
+    asyncio.run(DummyTool(client=client)._get("https://example.test/x"))
+    sent = client.sent_headers[0]
+    assert "Mozilla" in sent["User-Agent"], sent
+    assert "agent-runtime" in sent["User-Agent"], "UA 里要留可联系的项目标识"
+    assert sent["Accept"].startswith("text/html"), sent
+    assert sent["Accept-Language"].startswith("zh"), sent
+
+
+def test_a_tool_specific_header_wins_over_the_default() -> None:
+    client = SequenceClient()
+    asyncio.run(
+        DummyTool(client=client)._get(
+            "https://example.test/x", headers={"Accept": "application/json"}
+        )
+    )
+    assert client.sent_headers[0]["Accept"] == "application/json"
+
+
+# ── 重试：只对"对方明确说稍后再试"的响应重试一次 ──
+
+
+def test_a_transient_429_is_retried_once_and_can_succeed() -> None:
+    client = SequenceClient(FakeResponse(429, "slow down"), FakeResponse(200, "ok"))
+    outcome = asyncio.run(DummyTool(client=client)._get("https://example.test/x"))
+    assert client.calls == 2
+    assert outcome.ok is True and outcome.text == "ok"
+
+
+def test_a_transient_500_is_retried_once() -> None:
+    client = SequenceClient(FakeResponse(500, "boom"), FakeResponse(200, "ok"))
+    outcome = asyncio.run(DummyTool(client=client)._get("https://example.test/x"))
+    assert client.calls == 2
+    assert outcome.ok is True
+
+
+def test_retry_happens_at_most_once_and_says_so() -> None:
+    client = SequenceClient(FakeResponse(503, "nope"))
+    outcome = asyncio.run(DummyTool(client=client)._get("https://example.test/x"))
+    assert client.calls == 2, "最多重试一次（不许无限重试）"
+    assert outcome.ok is False
+    assert "503" in (outcome.error or "")
+    assert "重试" in (outcome.error or ""), "重试过就要说出来，否则排障时看不见"
+
+
+def test_a_403_is_not_retried() -> None:
+    """403 是"对方不打算给你看"：换一次同样的头再问一遍只是白等（也费对方资源）。"""
+    client = SequenceClient(FakeResponse(403, "forbidden"))
+    outcome = asyncio.run(DummyTool(client=client)._get("https://example.test/x"))
+    assert client.calls == 1
+    assert outcome.ok is False and "403" in (outcome.error or "")
+
+
+def test_a_404_is_not_retried() -> None:
+    client = SequenceClient(FakeResponse(404, "missing"))
+    asyncio.run(DummyTool(client=client)._get("https://example.test/x"))
+    assert client.calls == 1
+
+
+def test_a_transport_error_is_not_retried_inside_the_tool() -> None:
+    """超时/连接错误**不**在工具内重试：外层 `asyncio.wait_for(agent_tool_timeout)` 只有 30s，
+    工具内 20s 超时再重试一次会被外层掐掉，连可读错误都拿不到（诊断价值归零）。"""
+    client = SequenceClient(exc=TimeoutError("模拟超时"))
+    outcome = asyncio.run(DummyTool(client=client)._get("https://example.test/x"))
+    assert client.calls == 1
+    assert outcome.ok is False
+    assert "timeout" in (outcome.error or "").lower()
+
+
 def test_ok_response_returns_success_outcome() -> None:
     outcome = asyncio.run(DummyTool(client=FakeClient())._get("https://example.test/x"))
     assert isinstance(outcome, HttpOutcome)
@@ -70,7 +160,17 @@ def test_client_receives_method_url_and_user_agent() -> None:
     assert method.upper() == "GET"
     assert url == "https://example.test/x"
     headers = kw.get("headers") or {}
-    assert headers.get("User-Agent") == "agent-runtime/0.1"
+    assert "Mozilla" in headers.get("User-Agent", ""), "裸 UA 会被很多站点直接 403"
+    assert "agent-runtime" in headers.get("User-Agent", ""), "要留可联系的项目标识"
+
+
+def test_a_custom_user_agent_wins() -> None:
+    client = FakeClient()
+    asyncio.run(
+        DummyTool(client=client, user_agent="my-bot/1.0")._get("https://example.test/x")
+    )
+    assert client.last_call is not None
+    assert (client.last_call[2].get("headers") or {})["User-Agent"] == "my-bot/1.0"
 
 
 def test_404_becomes_failure_outcome() -> None:

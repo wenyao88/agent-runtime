@@ -225,7 +225,26 @@ AGENT_CONTEXT_COMPACTION_THRESHOLD=0.8
 python scripts/run_benchmark.py --provider mock            # 离线跑全量 100 条（不需要 key / 网络）
 python scripts/run_benchmark.py --provider real --limit 3  # 真实链路抽样（会花钱）
 python scripts/run_benchmark.py --provider real --judge 3  # 另抽 3 条做 LLM 裁判
+python scripts/inspect_run.py                              # 只读巡检：概览 + 工具失败分布
+python scripts/inspect_run.py --run <run_id>               # 某一轮：逐任务失败原因（含轮次 x/y）
+python scripts/inspect_run.py --json                       # 机器可读
 ```
+
+**搜索 provider（研究类任务的关键路径）**：
+
+| provider | 配置 | 说明 |
+|---|---|---|
+| `duckduckgo`（默认） | 无需 key | Instant Answer 接口：**不是通用网页搜索**，只覆盖实体/主题摘要。冷门主题会返回 `(no results) 无结果`（**success=True**），Agent 只好反复换词重试 |
+| `tavily` | `WEB_SEARCH_PROVIDER=tavily` + `WEB_SEARCH_API_KEY=tvly-…` | 通用网页搜索；`search_depth=basic`（1 credit/次），`max_results` 取工具参数（默认 5） |
+
+**开跑前会拦住的致命配置**：`WEB_SEARCH_PROVIDER=tavily` 却没填 key（或 provider 拼错）时，真实评测**直接拒绝开跑**
+（exit 2，CLI 打印原因；API 返回 `started: false` + errors）—— 否则每条研究类任务都会白烧到 `max_steps` 才失败。
+`--provider mock` 不受影响（夹具不调用工具）。**没有自动 fallback**（避免同一份报告里两组用了不同 provider 的归因混乱）。
+
+**抓取（`web_scrape`）**：默认带 `Accept` / `Accept-Language` 与可联系的真实 UA（裸 UA 会被很多站点直接 403）；
+对 **429/5xx**（对方明确说稍后再试）自动重试**一次**并在错误文本里标注"已重试 N 次"；**403/404 不重试**
+（同样的请求再问一遍不会变），超时/连接错误也不在工具内重试（外层 `AGENT_TOOL_TIMEOUT_SECONDS` 只有 30s，
+工具内 20s 超时再重试会被外层掐掉，连可读错误都拿不到）。
 
 任务集在 `benchmarks/tasks.json`（100 条：GitHub 分析 50 + 技术调研 50，其中每类 10 对"成对相关任务"）；
 报告写到 `benchmark_runs/`（已 gitignore）。
@@ -241,6 +260,7 @@ python scripts/run_benchmark.py --provider real --judge 3  # 另抽 3 条做 LLM
 | 工具选择准确率 | `已用工具 ⊇ 必需工具` 的任务占比 |
 | 工具参数准确率 | 任务声明的 `expected_args` 命中数 / 声明总数（**只在声明过的任务上算**） |
 | 平均步数 / 平均 token / 平均耗时 | 逐任务 `AgentResult` 的均值（只统计真的产出结果的任务） |
+| 平均轮次 | 真实 **LLM 轮次**的平均。**与"平均步数"不是一回事**：`steps` 是"工具调用数 + 1"，一轮里模型可以一次发多个 `tool_calls`（真实全量常见 2 个）。只看步数会误判"离 `max_steps` 还有多远"（曾出现"步数 31 + `max_steps(15)`"这种看似矛盾的读数） |
 | 压缩比 | `Σ(压缩前 − 压缩后) / Σ压缩前`，来自 `compaction` 事件，并按策略拆分 |
 | 压缩事件 / 按策略分布 | 事件**条数**（含 `noop`：被触发就算一次）；与"压缩比 `—` = 没测"是两件事 |
 | 摘要 token / 摘要耗时 | 摘要那次**额外** LLM 调用的合计成本（来自摘要器自报的 `usage`；0 = 没摘要或 provider 没报 usage，不估算） |

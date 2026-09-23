@@ -12,7 +12,11 @@ from .file_reader import FileReaderTool
 from .github import register_github_tools
 from .pdf_reader import PDFReaderTool
 from .web_scraper import WebScraperTool
-from .web_search import WebSearchTool
+from .web_search import (
+    DEFAULT_SEARCH_PROVIDER,
+    SUPPORTED_SEARCH_PROVIDERS,
+    WebSearchTool,
+)
 
 NATIVE_TOOL_NAMES = (
     "read_file",
@@ -27,6 +31,33 @@ NATIVE_TOOL_NAMES = (
 
 DEFAULT_HTTP_TIMEOUT = 20.0
 DEFAULT_MAX_CHARS = 4000
+
+
+def search_config_errors(settings: Any) -> list[str]:
+    """搜索配置的**致命**错误：这样配下去，每次 `web_search` 都必然失败。
+
+    真实全量实测（2026-09-23）：`WEB_SEARCH_PROVIDER=tavily` 而没填 key 时，
+    研究类任务会一路重试到 `max_steps` 才失败 —— 每条白烧 15 轮 LLM 调用。
+    所以真实评测**开跑前**就拒绝（mock 不受影响：夹具不调用工具）。
+
+    返回空列表 = 没问题（`duckduckgo` 免 key，是默认值）。
+    """
+    raw = str(getattr(settings, "web_search_provider", "") or "").strip().lower()
+    provider = raw or DEFAULT_SEARCH_PROVIDER
+    if provider not in SUPPORTED_SEARCH_PROVIDERS:
+        return [
+            f"未知的搜索 provider：{provider!r}；可选：{', '.join(SUPPORTED_SEARCH_PROVIDERS)}"
+            "（WEB_SEARCH_PROVIDER 拼错会让每次搜索都失败）"
+        ]
+    if provider == "tavily" and not str(
+        getattr(settings, "web_search_api_key", "") or ""
+    ).strip():
+        return [
+            "WEB_SEARCH_PROVIDER=tavily 但没有 WEB_SEARCH_API_KEY："
+            "每次搜索都会失败，研究类任务会白跑到 max_steps。"
+            "请填 key，或把 WEB_SEARCH_PROVIDER 换回 duckduckgo"
+        ]
+    return []
 
 
 def register_native_tools(

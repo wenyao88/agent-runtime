@@ -47,6 +47,15 @@ class ToolEvent:
     success: bool
     result_chars: int = 0
 
+    error_excerpt: str = ""
+    """失败结果的**前 200 字符**（成功时为空）。
+
+    为什么存它：进度文件是"跑挂之后唯一的现场"（报告里只有判分，没有工具文本）。
+    没有这一段，`inspect_run.py` 只能告诉你"某工具失败了 45 次、每次 79~113 字符"，
+    却看不出是 `HTTP 403` 还是 `timeout` —— 而这两者的修法完全不同。
+    `ponytail:` 只存片段（200 字符）而不是全文：现场诊断够用，且不让进度文件膨胀。
+    """
+
 
 @dataclass
 class CompactionEvent:
@@ -98,6 +107,12 @@ class TaskVerdict:
     steps: int = 0
     min_steps: int = 0
     """任务声明的期望步数。**只记录不判分**（口径见 spec §5）。"""
+
+    rounds: int = 0
+    """真实用掉的 **LLM 轮次**（与 `steps` 不是一回事，见 `AgentResult.rounds`）。"""
+
+    max_steps: int = 0
+    """轮次上限（`0` = 未知，展示时省略"x/y"）。"""
     total_tokens: int = 0
     latency_ms: int = 0
     error: str = ""
@@ -132,6 +147,11 @@ class BenchmarkMetrics:
     tool_selection_accuracy: float | None = None
     tool_argument_accuracy: float | None = None
     avg_steps: float | None = None
+    avg_rounds: float | None = None
+    """平均 **LLM 轮次**（与 `avg_steps` 并列：后者是"工具调用数 + 1"的平均）。
+
+    真实全量实测里这两个数差一倍以上（一轮常发 2 个 tool_calls），
+    只看 `avg_steps` 会误判"离 max_steps 还有多远"。"""
     avg_total_tokens: float | None = None
     avg_latency_ms: float | None = None
     compression_ratio: float | None = None

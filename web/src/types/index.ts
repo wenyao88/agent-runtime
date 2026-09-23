@@ -33,6 +33,8 @@ export type BenchmarkMetrics = {
   tool_selection_accuracy: number | null;
   tool_argument_accuracy: number | null;
   avg_steps: number | null;
+  /** 真实 LLM 轮次（`avg_steps` 是"工具调用数 + 1"的平均，两者不是一回事）。 */
+  avg_rounds?: number | null;
   avg_total_tokens: number | null;
   avg_latency_ms: number | null;
   compression_ratio: number | null;
@@ -62,11 +64,16 @@ export type TaskVerdict = {
   skills_used: string[];
   steps: number;
   min_steps: number;
+  /** 真实 LLM 轮次与轮次上限（旧报告没有这两个字段 → 显示 `—`）。 */
+  rounds?: number;
+  max_steps?: number;
   total_tokens: number;
   latency_ms: number;
   error: string;
   judge_scores: Record<string, number> | null;
   judge_reason: string;
+  /** 判分是从进度文件捡回来的（上一轮已成功跑过），不是本轮刚跑。 */
+  skipped?: boolean;
 };
 
 export type BenchmarkRunSummary = {

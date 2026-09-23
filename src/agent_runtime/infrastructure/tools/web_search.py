@@ -99,6 +99,12 @@ async def _run_tavily(tool: "WebSearchTool", query: str, max_results: int):
 
 _RUNNERS = {"duckduckgo": _run_duckduckgo, "tavily": _run_tavily}
 
+SUPPORTED_SEARCH_PROVIDERS: tuple[str, ...] = tuple(sorted(_RUNNERS))
+"""可选 provider（启动校验与错误信息共用同一份名单，避免两处漂移）。"""
+
+DEFAULT_SEARCH_PROVIDER = DEFAULT_PROVIDER
+"""默认 provider 的公开别名：空值走它（唯一口径，不在别处硬编码 "duckduckgo"）。"""
+
 
 class WebSearchTool(HttpToolBase):
     name = "web_search"

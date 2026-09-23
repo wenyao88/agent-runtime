@@ -46,3 +46,14 @@ class AgentResult:
     trace_id: str = ""
     warning: str | None = None
     skills_used: list[str] = field(default_factory=list)
+
+    rounds: int = 0
+    """真实用掉的 **LLM 轮次**（循环迭代次数）。
+
+    与 `steps` **不是一回事**：`steps` 是"工具调用数 + 1"，一轮里模型可以一次发多个
+    `tool_calls`（真实全量里常见 2 个），于是 `len(steps)` 会明显大于轮次 ——
+    CLI 里曾出现"步数 31 + max_steps(15)"这种看着自相矛盾的组合。
+    不含撞 `max_steps` 之后那次强制收尾的额外调用（那是 `warning` 的事）。"""
+
+    max_steps: int = 0
+    """这一轮的轮次上限（`0` = 调用方没给，展示时省略"x/y"）。"""

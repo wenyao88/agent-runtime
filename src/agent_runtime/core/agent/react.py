@@ -259,6 +259,8 @@ class ReActLoop:
             task=task, final_answer=answer, steps=steps, total_tokens=total,
             total_latency_ms=total_latency, trace_id=trace_id, warning=warning,
             skills_used=skills_used,
+            # `rounds` = 真的走了几轮循环（`steps` 是工具调用数，别混）
+            rounds=final_step, max_steps=self.max_steps,
         )
         if self.memory:
             await self.memory.store(MemoryEntry(

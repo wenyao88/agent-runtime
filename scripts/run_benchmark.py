@@ -29,6 +29,7 @@ _METRIC_ROWS = (
     ("工具选择准确率", "tool_selection_accuracy", "pct"),
     ("工具参数准确率", "tool_argument_accuracy", "pct"),
     ("平均步数", "avg_steps", "num"),
+    ("平均轮次", "avg_rounds", "num"),
     ("平均 token", "avg_total_tokens", "num"),
     ("平均耗时(ms)", "avg_latency_ms", "num"),
     ("压缩比", "compression_ratio", "pct"),
@@ -162,9 +163,14 @@ def format_verdicts(verdicts: list, limit: int = 50) -> str:
         if getattr(verdict, "extra_tool_calls", 0):
             notes.append(f"多余工具调用 {verdict.extra_tool_calls}")
         suffix = ("  " + "；".join(notes)) if notes else ""
+        rounds = getattr(verdict, "rounds", 0) or 0
+        max_steps = getattr(verdict, "max_steps", 0) or 0
+        # 轮次与步数是两个数：一步一轮发多个工具调用时，只看"步数"会误判离上限还有多远
+        rounds_text = f"  轮次 {rounds}/{max_steps}" if max_steps else f"  轮次 {rounds}"
+        skipped = "  ↻ 续跑复用" if getattr(verdict, "skipped", False) else ""
         lines.append(
             f"{mark} {verdict.task_id}  步数 {getattr(verdict, 'steps', 0)}"
-            f"  token {getattr(verdict, 'total_tokens', 0)}{suffix}"
+            f"{rounds_text}  token {getattr(verdict, 'total_tokens', 0)}{skipped}{suffix}"
         )
     if len(verdicts) > limit:
         lines.append(f"…（共 {len(verdicts)} 条，已省略 {len(verdicts) - limit} 条）")
@@ -188,6 +194,9 @@ def _load_settings():
             judge_llm_api_key="",
             judge_llm_base_url="",
             tool_http_timeout_seconds=20.0,
+            # 搜索配置：缺字段会让启动校验误报，所以兜底里也要有（默认 duckduckgo 免 key）
+            web_search_provider="duckduckgo",
+            web_search_api_key="",
         )
     return Settings()
 
@@ -222,6 +231,20 @@ def _grouped_agent_factory():
         return real_agent_factory(lambda: agent)
 
     return factory_for_settings
+
+
+def _fatal_config_errors(settings: object, provider: str) -> list[str]:
+    """真实评测开跑前的致命配置校验（mock 不涉及工具，跳过）。
+
+    真实全量实测：`WEB_SEARCH_PROVIDER=tavily` 没填 key 时，研究类任务会白烧到 `max_steps` 才失败 ——
+    宁可在开跑前拒绝，也别让 300 条任务在几个小时后告诉你"搜索从来没成功过"。
+    """
+    from agent_runtime.infrastructure.benchmark.catalog import MOCK_PROVIDER
+    from agent_runtime.infrastructure.tools.catalog import search_config_errors
+
+    if (provider or "").strip().lower() == MOCK_PROVIDER:
+        return []
+    return search_config_errors(settings)
 
 
 def _model_label(settings: object, provider: str) -> str:
@@ -471,6 +494,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.ablation and args.group:
         print(f"注意：同时给了 --ablation 与 --group，按 --ablation 跑三组（--group {args.group} 被忽略）")
+
+    fatal = _fatal_config_errors(settings, args.provider)
+    if fatal:
+        for problem in fatal:
+            print(f"错误：{problem}")
+        print("已拒绝开跑（真实评测不该拿注定失败的配置烧几小时）。")
+        return 2
 
     from agent_runtime.infrastructure.benchmark.service import ResumeError
 

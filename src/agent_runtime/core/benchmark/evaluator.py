@@ -75,6 +75,10 @@ def evaluate(task: BenchmarkTask, run: TaskRun) -> TaskVerdict:
     verdict.warning = result.warning
     verdict.skills_used = list(result.skills_used or [])
     verdict.steps = len(_steps(result))
+    # 轮次与工具调用数是两个数：真实全量里一轮常发 2 个 tool_calls，
+    # 只看 `steps` 会得出"31 步却撞了 max_steps(15)"这种自相矛盾的读数。
+    verdict.rounds = int(getattr(result, "rounds", 0) or 0)
+    verdict.max_steps = int(getattr(result, "max_steps", 0) or 0)
     verdict.total_tokens = int(getattr(result.total_tokens, "total_tokens", 0) or 0)
     verdict.latency_ms = int(result.total_latency_ms or 0)
     verdict.success = bool(

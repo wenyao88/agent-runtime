@@ -376,6 +376,52 @@ def test_ablation_id_continues_the_same_round() -> None:
         shutil.rmtree(out, ignore_errors=True)
 
 
+def test_a_fatal_search_config_is_refused_before_a_real_run() -> None:
+    """真实全量实测：tavily 没 key → 每条研究类任务白烧到 max_steps。开跑前就该拒绝。"""
+    module = _load()
+    import types
+
+    original = module._load_settings
+    module._load_settings = lambda: types.SimpleNamespace(
+        benchmark_tasks_file="benchmarks/tasks.json",
+        benchmark_runs_dir="benchmark_runs",
+        llm_model="m", llm_api_key="k", llm_base_url="http://x",
+        judge_llm_model="j", judge_llm_api_key="", judge_llm_base_url="",
+        tool_http_timeout_seconds=20.0,
+        web_search_provider="tavily",
+        web_search_api_key="",
+    )
+    try:
+        code = module.main(["--provider", "real", "--limit", "1", "--out", str(_new_dir())])
+    finally:
+        module._load_settings = original
+    assert code == 2, "配置注定失败时不许开跑"
+
+
+def test_a_fatal_search_config_does_not_block_a_mock_run() -> None:
+    """mock 夹具不调用工具，所以照样能跑（否则离线自检会被搜索配置卡死）。"""
+    module = _load()
+    import types
+
+    original = module._load_settings
+    module._load_settings = lambda: types.SimpleNamespace(
+        benchmark_tasks_file="benchmarks/tasks.json",
+        benchmark_runs_dir="benchmark_runs",
+        llm_model="m", llm_api_key="", llm_base_url="http://x",
+        judge_llm_model="j", judge_llm_api_key="", judge_llm_base_url="",
+        tool_http_timeout_seconds=20.0,
+        web_search_provider="tavily",
+        web_search_api_key="",
+    )
+    out = _new_dir()
+    try:
+        code = module.main(["--provider", "mock", "--limit", "1", "--out", str(out)])
+    finally:
+        module._load_settings = original
+        shutil.rmtree(out, ignore_errors=True)
+    assert code == 0
+
+
 def _run_all() -> None:
     failed: list[str] = []
     tests = [

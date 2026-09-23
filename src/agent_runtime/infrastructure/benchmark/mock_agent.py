@@ -89,5 +89,7 @@ class MockBenchmarkAgent:
             total_tokens=TokenUsage(total_tokens=_TOKENS_PER_STEP * len(steps)),
             total_latency_ms=_LATENCY_PER_STEP_MS * len(steps),
             trace_id="mock",
+            # 夹具没有真的循环：就用"每条必需工具一轮"作为合成的轮次（`max_steps=0` = 未知）
+            rounds=len(self._task.required_tools),
         )
         yield AgentEvent(AgentEventType.FINAL_ANSWER, {"content": answer})

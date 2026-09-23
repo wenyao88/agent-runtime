@@ -62,6 +62,7 @@ def summarize(
     measured = [v for v in verdicts if not v.error]
     metrics.tasks_errored = len(verdicts) - len(measured)
     metrics.avg_steps = _mean([v.steps for v in measured])
+    metrics.avg_rounds = _mean([v.rounds for v in measured])
     metrics.avg_total_tokens = _mean([v.total_tokens for v in measured])
     metrics.avg_latency_ms = _mean([v.latency_ms for v in measured])
 

@@ -255,6 +255,15 @@ def start_benchmark_run(
             "errors": errors or [f"任务集为空：{tasks_file}"],
         }
 
+    # 启动校验（真实全量实测）：搜索配置错了就别开跑 —— 每条研究类任务都会白烧到 max_steps。
+    # mock 不受影响（夹具不调用工具）。
+    if provider != "mock":
+        from agent_runtime.infrastructure.tools.catalog import search_config_errors
+
+        fatal = search_config_errors(settings)
+        if fatal:
+            return {"run_id": run_id, "started": False, "errors": fatal}
+
     # 真实 provider 复用 API 自己的装配（api 可以 import 自己）；mock 用离线假 agent。
     # 注意必须经 `real_agent_factory` 包一层：`get_agent(llm=None)` 的第一个形参是 llm，
     # 直接传 `get_agent` 会让 runner 的 `factory(task)` 把 task 塞进 llm —— 见 catalog 里那段注释。
