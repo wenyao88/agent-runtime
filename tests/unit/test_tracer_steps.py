@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from agent_runtime.core.agent.base import AgentResult  # noqa: E402
 from agent_runtime.core.llm.types import TokenUsage  # noqa: E402
 from agent_runtime.core.tool.base import ToolResult  # noqa: E402
+from agent_runtime.core.trace.models import TraceSession  # noqa: E402
 from agent_runtime.core.trace.store import InMemoryTraceStore  # noqa: E402
 from agent_runtime.core.trace.tracer import Tracer  # noqa: E402
 
@@ -78,8 +79,78 @@ def test_multiple_tool_calls_in_one_round_are_all_kept() -> None:
     results = session.steps[0].tool_result
     assert isinstance(calls, list) and len(calls) == 2, calls
     assert isinstance(results, list) and len(results) == 2, results
-    assert results[1]["success"] is False
-    assert "boom" in results[1]["text"]
+
+
+def test_a_multi_tool_step_can_be_serialized_and_read_back() -> None:
+    """审查 BLOCKER：`to_dict()` 原来对**列表式** tool_call/tool_result 调 `dict()`。
+
+    * 两个调用 + 两个结果 → `ValueError`（`/api/traces/{id}` 直接 500）；
+    * 两个调用、还没结果 → **静默错版**成 `{"tool_name": "args"}`（比抛异常更坏：数据看着是"对"的）。
+
+    这条必须走**真序列化 + 真读回**，只断言列表形状是抓不到的（既有用例就是这么漏过去的）。
+    """
+
+    async def run():
+        tracer = Tracer()
+        session = await tracer.start_session("读两个文件")
+        tracer.record_thought(1, "一次读两个")
+        tracer.record_tool_call(1, "read_file", {"path": "a.txt"})
+        tracer.record_tool_call(1, "read_file", {"path": "b.txt"})
+        tracer.record_tool_result(1, ToolResult(tool_name="read_file", success=True, text="A"))
+        tracer.record_tool_result(1, ToolResult(tool_name="read_file", success=False, text="boom"))
+        return session
+
+    session = asyncio.run(run())
+    payload = session.to_dict()
+    step = payload["steps"][0]
+    assert isinstance(step["tool_call"], list) and len(step["tool_call"]) == 2, step["tool_call"]
+    assert step["tool_call"][1]["args"] == {"path": "b.txt"}, step["tool_call"]
+    assert isinstance(step["tool_result"], list) and len(step["tool_result"]) == 2, step["tool_result"]
+    assert step["tool_result"][1]["success"] is False, step["tool_result"]
+
+    # 读回也要能处理两种形状（单调用是 dict、多调用是 list）
+    restored = TraceSession.from_dict(payload)
+    assert restored.steps[0].to_dict() == step, restored.steps[0].to_dict()
+
+
+def test_a_single_tool_step_still_serializes_as_a_plain_object() -> None:
+    """单调用保持原来的形状（dict）—— 改序列化不能把老数据的形状也换掉。"""
+
+    async def run():
+        tracer = Tracer()
+        session = await tracer.start_session("读一个文件")
+        tracer.record_tool_call(1, "read_file", {"path": "a.txt"})
+        tracer.record_tool_result(1, ToolResult(tool_name="read_file", success=True, text="A"))
+        return session
+
+    session = asyncio.run(run())
+    step = session.to_dict()["steps"][0]
+    assert isinstance(step["tool_call"], dict), step["tool_call"]
+    assert isinstance(step["tool_result"], dict), step["tool_result"]
+
+
+def test_a_step_records_the_token_usage_of_its_own_round() -> None:
+    """审查 MAJOR：`token_usage` 以前从没被写过，却按 0 渲染 —— 违反 `None ≠ 0`。
+
+    口径：**一步 = 一轮 LLM 调用**，所以这一轮的 usage 记在这一步上（`steps` 是工具调用数，
+    与轮次不是一回事，但两者都发生在同一轮里）。
+    """
+
+    async def run():
+        tracer = Tracer()
+        session = await tracer.start_session("问一句")
+        tracer.record_thought(
+            1, "想", usage=TokenUsage(prompt_tokens=11, completion_tokens=7, total_tokens=18)
+        )
+        tracer.record_thought(2, "再想")
+        return session
+
+    session = asyncio.run(run())
+    first, second = session.steps
+    assert first.token_usage.total_tokens == 18, first.token_usage
+    assert first.token_usage.prompt_tokens == 11, first.token_usage
+    assert second.token_usage.total_tokens == 0, "没给 usage 的那一步保持默认（未被测量，不是假的 0）"
+    assert session.to_dict()["steps"][0]["token_usage"]["total_tokens"] == 18
 
 
 def test_steps_are_ordered_by_step_number() -> None:

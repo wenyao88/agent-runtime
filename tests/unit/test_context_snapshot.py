@@ -69,7 +69,29 @@ def test_snapshot_splits_system_memory_task_and_messages() -> None:
     assert by_name["memory"]["tokens"] > 0, "记忆注入必须单独成段"
     assert by_name["task"]["chars"] == len("调研 pgvector")
     assert by_name["messages"]["chars"] == len("中间") + len("工具结果") + len("最近")
-    assert sum(section["tokens"] for section in snap["sections"]) == snap["used_tokens"]
+    # 分段是**拆解**，不是账本：`used_tokens` 必须等于真正决定压缩与否的那个数
+    # （`token_count()`；分词器不可加，逐段相加会和它差几个 token —— 审查 m2 实测到过）。
+    assert sum(section["tokens"] for section in snap["sections"]) > 0
+
+
+def test_snapshot_used_tokens_is_the_number_that_triggers_compaction() -> None:
+    """审查 m2：`used_tokens` 必须等于 `token_count()`（`should_compact`/`compact` 用的那个数）。
+
+    原实现把四个分段各自的 `_count()` 相加当总数，而分词器**不可加** —— Inspector 上会看到一个
+    与"到底会不会触发压缩"不同的数（实测差过 1 个 token）。分段只当拆解看，总数走真账本。
+    """
+
+    async def run():
+        cm = ContextManager(budget=_budget(), keep_recent=2)
+        await cm.build(task="做点事", system_prompt="SYS")
+        cm.append(Message(role="assistant", content="中间"))
+        cm.append(Message(role="user", content="再来"))
+        return cm, cm.snapshot()
+
+    cm, snap = asyncio.run(run())
+    assert snap["used_tokens"] == cm.token_count(), (snap["used_tokens"], cm.token_count())
+    assert snap["ratio"] == cm.token_ratio(), (snap["ratio"], cm.token_ratio())
+    assert snap["ratio"] < 1, "占用比是「已占多少」，不是「还剩多少」"
 
 
 def test_snapshot_without_memory_reports_a_zero_memory_block() -> None:

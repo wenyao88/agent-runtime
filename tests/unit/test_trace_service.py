@@ -51,6 +51,45 @@ class RaisingStore:
         raise RuntimeError(self.message)
 
 
+class RuntimeErrorStore(InMemoryTraceStore):
+    """真 SQLite store 的行为：**运行期**写失败不抛，只记进自己的 `errors`（装配期错误是另一回事）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.errors: list[str] = []
+
+    def save(self, session) -> None:
+        super().save(session)
+        self.errors.append("trace xxx 未写入：database is locked")
+
+
+class UnserializableSession:
+    """取得到、但序列化会炸的会话（审查 BLOCKER 的兜底路径：序列化不许把 500 甩给前端）。"""
+
+    trace_id = "aaa"
+    events: list = []
+
+    def summary(self) -> dict:
+        return {"trace_id": "aaa"}
+
+    def to_dict(self) -> dict:
+        raise ValueError("无法序列化：dictionary update sequence element #0 has length 5")
+
+
+class UnserializableStore:
+    def save(self, session) -> None:  # pragma: no cover - 契约完整性
+        return None
+
+    def get(self, trace_id: str):
+        return UnserializableSession()
+
+    def list(self, limit: int = 50):
+        return []
+
+    def events(self, trace_id: str):
+        return []
+
+
 # ── 列表 ──
 
 
@@ -90,6 +129,16 @@ def test_list_reports_a_store_failure_instead_of_raising() -> None:
     assert body["errors"] and "disk on fire" in body["errors"][0], body
 
 
+def test_list_surfaces_the_stores_own_runtime_errors() -> None:
+    """审查 MAJOR：装配期错误有出口，**运行期**写失败以前没有 —— 盘满 / `database is locked`
+    时 UI 回 `errors: []`，看起来一切正常，实际这次 trace 根本没落盘。"""
+    store = RuntimeErrorStore()
+    store.save(_session("aaa", "task"))
+    body = traces_view(store)
+    assert body["count"] == 1, body
+    assert any("database is locked" in item for item in body["errors"]), body
+
+
 # ── 详情 ──
 
 
@@ -122,6 +171,17 @@ def test_detail_reports_a_store_failure_instead_of_raising() -> None:
     body = trace_view(RaisingStore(), "aaa")
     assert body["available"] is False, body
     assert "disk on fire" in body["reason"], body
+
+
+def test_detail_reports_a_serialization_failure_instead_of_raising() -> None:
+    """审查 BLOCKER 的兜底：会话取得到但序列化炸了时，接口要回可读原因，**不能** 500。
+
+    真正修的是 `TraceStep.to_dict()`（见 `test_tracer_steps.py`）；这条钉的是"就算还有别的
+    序列化坑，对外也是人读得懂的话，而不是 500"。
+    """
+    body = trace_view(UnserializableStore(), "aaa")
+    assert body["available"] is False, body
+    assert "无法序列化" in body["reason"], body
 
 
 # ── 事件 ──

@@ -128,6 +128,8 @@ def get_trace_store() -> TraceStore:
 
         store, errors = build_trace_store(get_settings(), str(_PROJECT_ROOT))
     except Exception as e:  # noqa: BLE001 —— 存储是可选能力，永不阻断启动
+        # 这是"一处装配"（catalog）唯一被绕开的地方：catalog **自己**都 import 不进来时，
+        # 已经没有别的地方可问了。默认内存 store 是零配置的那一档，行为与"没配 TRACE_STORE"一致。
         _trace_errors.append(f"trace 存储装配失败，已降级为内存：{type(e).__name__}: {e}")
         return InMemoryTraceStore()
     _trace_errors.extend(errors)

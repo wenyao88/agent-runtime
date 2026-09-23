@@ -33,7 +33,7 @@ from agent_runtime.core.trace.models import (  # noqa: E402
 )
 from agent_runtime.core.trace.store import InMemoryTraceStore  # noqa: E402
 from agent_runtime.infrastructure.trace.catalog import build_trace_store  # noqa: E402
-from agent_runtime.infrastructure.trace.store import SqliteTraceStore  # noqa: E402
+from agent_runtime.infrastructure.trace.store import MAX_ERRORS, SqliteTraceStore  # noqa: E402
 
 
 def _session(trace_id: str = "t1", *, source: str = "chat") -> TraceSession:
@@ -203,6 +203,18 @@ def test_a_garbage_file_degrades_instead_of_raising() -> None:
         assert store.list() == [], "降级状态下读到的是空，而不是半截数据"
         assert store.get("t1") is None
         assert store.events("t1") == []
+
+
+def test_the_error_list_is_capped_so_a_long_run_cannot_grow_it_forever() -> None:
+    """审查 MAJOR：盘坏 / `database is locked` 时每次写都追加一条，而这份列表会被 `/api/traces`
+    整份回给前端；只留最近 `MAX_ERRORS` 条（留着"最近出的问题"就够了）。"""
+    with _tmpdir() as tmp:
+        store = SqliteTraceStore(str(Path(tmp) / "trace.db"))
+        for index in range(MAX_ERRORS + 25):
+            store._record(f"第 {index} 条错误")
+        assert len(store.errors) == MAX_ERRORS, len(store.errors)
+        assert store.errors[-1] == f"第 {MAX_ERRORS + 24} 条错误", store.errors[-1]
+        assert "第 0 条错误" not in store.errors, "最旧的应当被挤掉"
 
 
 def test_a_bad_json_row_is_skipped() -> None:

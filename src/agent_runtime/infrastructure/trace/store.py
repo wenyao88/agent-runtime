@@ -27,6 +27,10 @@ from ...core.trace.store import DEFAULT_CAPACITY
 # 两张表：session 的**可查询列** + 整份 `session.to_dict()`。
 # 逐条 events 只随 `session_json` 落盘（同一事实只留一份真相）；`trace_events` 按 schema
 # 契约建出来备用，但不写入——要按事件检索时再回填，别现在就写两套真相。
+MAX_ERRORS = 50
+"""`errors` 只保留最近这么多条（长跑时盘坏会无限追加，而这份列表会整份回给前端）。"""
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS trace_sessions (
     trace_id TEXT PRIMARY KEY,
@@ -70,7 +74,7 @@ class SqliteTraceStore:
         self._conn: sqlite3.Connection | None = None
 
         if not self.path:
-            self.errors.append("SQLite trace 存储需要一个文件路径，当前为空 → 降级为空读空写")
+            self._record("SQLite trace 存储需要一个文件路径，当前为空 → 降级为空读空写")
             return
 
         conn: sqlite3.Connection | None = None
@@ -88,13 +92,23 @@ class SqliteTraceStore:
                     conn.close()
                 except sqlite3.Error:  # noqa: BLE001 —— 关不掉也不该把异常甩出去
                     pass
-            self.errors.append(
+            self._record(
                 f"SQLite trace 存储不可用（{self.path}）：{type(e).__name__}: {e}"
                 " → 读写降级为空，建议修路径或改 TRACE_STORE=memory"
             )
             return
 
         self._conn = conn
+
+    def _record(self, message: str) -> None:
+        """记一条错误；**只留最近 `MAX_ERRORS` 条**。
+
+        盘坏 / `database is locked` 时每次写都会追加一条，长跑能攒到几千条 —— 而这份列表会被
+        `/api/traces` 整个回给前端。留最近的就是"最近出的问题"（审查 MAJOR）。
+        """
+        self.errors.append(message)
+        if len(self.errors) > MAX_ERRORS:
+            del self.errors[:-MAX_ERRORS]
 
     # ── 写 ──
 
@@ -104,12 +118,12 @@ class SqliteTraceStore:
             return
         trace_id = str(session.trace_id)
         if self._conn is None:
-            self.errors.append(f"trace {trace_id} 未写入：SQLite 存储不可用（见上一条错误）")
+            self._record(f"trace {trace_id} 未写入：SQLite 存储不可用（见上一条错误）")
             return
         try:
             payload = session.to_dict()
         except Exception as e:  # noqa: BLE001 —— 会话本身不成形，也只是记错误
-            self.errors.append(f"trace {trace_id} 未写入：会话无法序列化 {type(e).__name__}: {e}")
+            self._record(f"trace {trace_id} 未写入：会话无法序列化 {type(e).__name__}: {e}")
             return
         try:
             finished_at = payload.get("finished_at")
@@ -131,7 +145,7 @@ class SqliteTraceStore:
             )
             self._conn.commit()  # 显式提交：否则"新实例重开文件"读不到（连接关闭即回滚）
         except (sqlite3.Error, TypeError, ValueError) as e:
-            self.errors.append(f"trace {trace_id} 未写入：{type(e).__name__}: {e}")
+            self._record(f"trace {trace_id} 未写入：{type(e).__name__}: {e}")
 
     # ── 读 ──
 
@@ -144,7 +158,7 @@ class SqliteTraceStore:
                 (str(trace_id or ""),),
             ).fetchone()
         except sqlite3.Error as e:
-            self.errors.append(f"读取 trace {trace_id} 失败：{type(e).__name__}: {e}")
+            self._record(f"读取 trace {trace_id} 失败：{type(e).__name__}: {e}")
             return None
         return self._decode(row[0]) if row else None
 
@@ -159,7 +173,7 @@ class SqliteTraceStore:
                 (size,),
             ).fetchall()
         except sqlite3.Error as e:
-            self.errors.append(f"列出 trace 失败：{type(e).__name__}: {e}")
+            self._record(f"列出 trace 失败：{type(e).__name__}: {e}")
             return []
         summaries = []
         for (payload,) in rows:
@@ -182,5 +196,5 @@ class SqliteTraceStore:
                 raise ValueError("session_json 不是 JSON 对象")
             return TraceSession.from_dict(data)
         except (ValueError, TypeError, KeyError, AttributeError) as e:
-            self.errors.append(f"跳过一条坏 trace 记录：{type(e).__name__}: {e}")
+            self._record(f"跳过一条坏 trace 记录：{type(e).__name__}: {e}")
             return None

@@ -168,7 +168,8 @@ class ReActLoop:
 
             thought = resp.content or ""
             if self.tracer:
-                self.tracer.record_thought(n, thought)
+                # 一步 = 一轮 LLM 调用，所以这一轮的 usage 跟着这一步走（Trace 页要显示每步 token）
+                self.tracer.record_thought(n, thought, usage=resp.token_usage)
             yield AgentEvent(AgentEventType.THOUGHT, {"step": n, "content": thought})
 
             if not resp.tool_calls:

@@ -174,7 +174,10 @@ class ContextManager:
             {"name": name, "tokens": _count(text) if text else 0, "chars": len(text)}
             for name, text in segments
         ]
-        used = sum(section["tokens"] for section in sections)
+        # 总数用**真账本** `token_count()`，不是逐段相加：分词器不可加，两者实测会差几个 token
+        # （审查 m2）。"会不会触发压缩"由 `token_count()` 决定，Inspector 就必须显示它；
+        # `sections` 只当拆解看。
+        used = self.token_count()
         return {
             "budget": {
                 "model_max_tokens": self._budget.model_max_tokens,

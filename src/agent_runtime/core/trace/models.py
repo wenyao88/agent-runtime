@@ -65,12 +65,34 @@ class TraceEvent:
         )
 
 
+def _step_payload(value: object) -> object:
+    """`tool_call`/`tool_result` 的序列化：**原样透传**。
+
+    这两个字段可能是 dict（这一步只调了一个工具）也可能是 list（一轮里发了多个并行调用 ——
+    `Tracer._append` 会在第二次调用时把它升级成列表，而并行调用在真实全量里是常态）。
+    原先这里写的是 `dict(self.tool_call)`：
+      * 列表 + 2 个结果 → `ValueError`（`/api/traces/{id}` 直接 500）；
+      * 列表 + 只有调用 → **静默错版**成 `{"tool_name": "args"}`（比抛异常更坏：数据看着是"对"的）。
+    """
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, list):
+        return [dict(item) if isinstance(item, dict) else item for item in value]
+    return value
+
+
 @dataclass
 class TraceStep:
     step_number: int
     thought: str | None = None
-    tool_call: dict | None = None
-    tool_result: dict | None = None
+    tool_call: dict | list | None = None
+    """一个工具调用（dict）或一轮里的多个调用（list）；两种形状都由 `Tracer` 真实产生。"""
+
+    tool_result: dict | list | None = None
+    """同上：一个结果或一串结果。"""
+
     token_usage: TokenUsage = field(default_factory=TokenUsage)
     latency_ms: int = 0
 
@@ -78,8 +100,8 @@ class TraceStep:
         return {
             "step_number": self.step_number,
             "thought": self.thought,
-            "tool_call": dict(self.tool_call) if self.tool_call else None,
-            "tool_result": dict(self.tool_result) if self.tool_result else None,
+            "tool_call": _step_payload(self.tool_call),
+            "tool_result": _step_payload(self.tool_result),
             "token_usage": _tokens_to_dict(self.token_usage),
             "latency_ms": self.latency_ms,
         }
@@ -91,8 +113,8 @@ class TraceStep:
         return cls(
             step_number=int(payload.get("step_number") or 0),
             thought=payload.get("thought"),
-            tool_call=dict(tool_call) if isinstance(tool_call, dict) else None,
-            tool_result=dict(tool_result) if isinstance(tool_result, dict) else None,
+            tool_call=_step_payload(tool_call),
+            tool_result=_step_payload(tool_result),
             token_usage=_tokens_from_dict(payload.get("token_usage")),
             latency_ms=int(payload.get("latency_ms") or 0),
         )

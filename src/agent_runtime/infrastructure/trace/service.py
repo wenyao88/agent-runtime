@@ -16,16 +16,28 @@ from ...core.trace.store import DEFAULT_CAPACITY, TraceStore
 
 
 def traces_view(store: TraceStore, *, limit: int = DEFAULT_CAPACITY) -> dict[str, Any]:
-    """列表：最新在前的小结 + 条数。store 坏了 → `errors` 里说明，仍回 200。"""
+    """列表：最新在前的小结 + 条数。store 坏了 → `errors` 里说明，仍回 200。
+
+    **两组错误都要出**：本次查询的错误 + store **自己记下**的运行期错误（盘满 / `database is locked`
+    导致某条 trace 根本没落盘）。后者以前没有出口 —— UI 回 `errors: []`，看起来一切正常，
+    实际历史里少了一条（审查 MAJOR）。
+    """
+    runtime_errors = _runtime_errors(store)
     try:
         items = list(store.list(limit))
     except Exception as e:  # noqa: BLE001 —— 对外接口不抛，如实回报
         return {
             "count": 0,
             "traces": [],
-            "errors": [f"列出 trace 失败：{type(e).__name__}: {e}"],
+            "errors": [f"列出 trace 失败：{type(e).__name__}: {e}", *runtime_errors],
         }
-    return {"count": len(items), "traces": items, "errors": []}
+    return {"count": len(items), "traces": items, "errors": runtime_errors}
+
+
+def _runtime_errors(store: TraceStore) -> list[str]:
+    """store 自报的运行期错误（可选能力：内存 store 没有这个属性）。"""
+    recorded = getattr(store, "errors", None)
+    return [str(item) for item in recorded] if isinstance(recorded, list) else []
 
 
 def _resolve(store: TraceStore, trace_id: str) -> tuple[TraceSession | None, str]:
@@ -43,11 +55,23 @@ def _resolve(store: TraceStore, trace_id: str) -> tuple[TraceSession | None, str
 
 
 def trace_view(store: TraceStore, trace_id: str) -> dict[str, Any]:
-    """详情（含 steps/config）：`available: false` + `reason` 时路由回 404。"""
+    """详情（含 steps/config）：`available: false` + `reason` 时路由回 404。
+
+    序列化也在这里兜底：`session.to_dict()` 一旦抛，这里回一句人读得懂的话，**不能让路由 500** ——
+    "存储/序列化坏了"和"服务器挂了"对使用者是两件事（审查 BLOCKER 的兜底那一半）。
+    """
     session, reason = _resolve(store, trace_id)
     if session is None:
         return {"available": False, "trace": None, "reason": reason}
-    return {"available": True, "trace": session.to_dict(), "reason": ""}
+    try:
+        payload = session.to_dict()
+    except Exception as e:  # noqa: BLE001
+        return {
+            "available": False,
+            "trace": None,
+            "reason": f"这条 trace 无法序列化（这是本项目的 bug，不是数据坏了）：{type(e).__name__}: {e}",
+        }
+    return {"available": True, "trace": payload, "reason": ""}
 
 
 def events_view(store: TraceStore, trace_id: str) -> dict[str, Any]:

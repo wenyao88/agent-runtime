@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Any
 
 from ..tool.base import ToolResult
+from ..llm.types import TokenUsage
 from .models import TraceEvent, TraceSession, TraceStep
 from .store import TraceStore
 
@@ -80,11 +81,20 @@ class Tracer:
         session.steps.sort(key=lambda item: item.step_number)
         return step
 
-    def record_thought(self, step: int, content: str) -> None:
+    def record_thought(
+        self, step: int, content: str, usage: TokenUsage | None = None
+    ) -> None:
+        """记一步的思考，连带这一轮 LLM 调用的 token 用量。
+
+        口径：**一步 = 一轮 LLM 调用**，所以那轮的 `usage` 就记在这一步上。不传就是"没测到"
+        （保持默认 0）—— 别拿估算值糊上去，`None ≠ 0` 这条口径对每一步同样成立。
+        """
         self._record("thought", step, {"content": content})
         target = self._step(step)
         if target is not None:
             target.thought = content
+            if usage is not None:
+                target.token_usage = usage
 
     def record_tool_call(self, step: int, tool: str, args: dict) -> None:
         payload = {"tool_name": tool, "args": args}
