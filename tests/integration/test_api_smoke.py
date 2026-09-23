@@ -222,15 +222,34 @@ def test_chat_and_ws_smoke() -> None:
             assert missing.status_code == 404, missing.text
             assert "nope" in missing.json()["detail"], missing.json()
 
-            # ── REST: GET /api/context ──
-            # 这里必然 available=False：本用例用 dependency_overrides 换掉了 deps.get_agent，
-            # 而"最近一次会话的上下文"只由 deps.get_agent 记录。正面路径由
-            # tests/unit/test_context_service.py 覆盖；这里只钉住"拿不到也不 500，且给得出原因"。
-            ctx_resp = client.get("/api/context")
-            assert ctx_resp.status_code == 200, ctx_resp.text
-            ctx_body = ctx_resp.json()
-            assert ctx_body["available"] is False, ctx_body
-            assert ctx_body["reason"], ctx_body
+            # ── REST: GET /api/context（**正面**路径，审查 M6）──
+            # 上面两轮会话走的是 dependency_overrides / 打补丁换进去的 agent，**不经过**
+            # `deps.get_agent`，所以 `_LAST_CONTEXT` 一直是 None，只测到 available:false 那一半。
+            # 这里用真的 `deps.get_agent(llm=...)` 装配一个 agent 并跑一轮（MockLLM 直接给答案、
+            # 不调工具、不发网络请求），把"最近一次聊天会话的上下文"这条设计**跑出来**验证。
+            import asyncio
+
+            from agent_runtime.core.llm.types import LLMResponse
+            from agent_runtime.infrastructure.llm.mock import MockLLMProvider
+
+            live = deps_mod.get_agent(llm=MockLLMProvider([LLMResponse(content="直接回答")]))
+            asyncio.run(live.run("只回答一句话"))
+
+            ctx_ok = client.get("/api/context")
+            assert ctx_ok.status_code == 200, ctx_ok.text
+            ctx_body = ctx_ok.json()
+            assert ctx_body["available"] is True, ctx_body
+            assert ctx_body["used_tokens"] > 0, ctx_body
+            assert ctx_body["messages"] >= 2, ctx_body
+            assert [s["name"] for s in ctx_body["sections"]] == [
+                "system",
+                "memory",
+                "task",
+                "messages",
+            ], ctx_body
+
+            # 装配错误要为可见性服务，而不是阻断启动
+            assert app.state.trace_errors == [], app.state.trace_errors
     finally:
         ws_mod.get_agent = original_ws_get_agent
         settings.mcp_servers_file = original_mcp_file

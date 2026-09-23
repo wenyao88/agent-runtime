@@ -10,7 +10,6 @@ tools/list / tools/call、结果 content:[{type:"text",text}] + isError）。
 from __future__ import annotations
 
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -391,42 +390,9 @@ def test_handle_line_internal_error_is_reported_not_raised() -> None:
     assert payload["error"]["code"] == -32603
 
 
-# ── 结构约束：core 不得依赖第三方 / IO 层 / API 层 ──
-
-_IMPORT_RE = re.compile(r"^\s*(?:from\s+([.\w]+)\s+import|import\s+([.\w]+))")
-_FORBIDDEN_LAYERS = {"infrastructure", "api"}
-
-
-def test_core_mcp_imports_are_stdlib_or_core_only() -> None:
-    """只扫 import 语句（注释里提到某层的路径不算违规，真的 import 才算）。
-
-    判定用 allowlist（`sys.stdlib_module_names`）而不是黑名单：黑名单挡不住 yaml、numpy
-    这类"谁都可能顺手 import 一下"的包，allowlist 天生挡得住。
-    """
-    source_root = Path(__file__).resolve().parents[2] / "src" / "agent_runtime" / "core" / "mcp"
-    files = sorted(source_root.glob("*.py"))
-    assert files, "core/mcp 目录必须存在"
-    for path in files:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            match = _IMPORT_RE.match(line)
-            if match is None:
-                continue
-            module = match.group(1) or match.group(2)
-            segments = [s for s in module.split(".") if s]
-            if module.startswith("."):
-                assert not _FORBIDDEN_LAYERS.intersection(
-                    segments
-                ), f"{path.name}: 相对 import 不得跨层：{line.strip()}"
-                continue
-            assert not _FORBIDDEN_LAYERS.intersection(
-                segments
-            ), f"{path.name}: 不得 import IO/API 层：{line.strip()}"
-            if segments[0] == "agent_runtime":
-                assert segments[1:2] == ["core"], f"{path.name}: 只能依赖 core 内部：{line.strip()}"
-                continue
-            assert segments[0] in sys.stdlib_module_names, (
-                f"{path.name}: core 只允许标准库，但 import 了 {segments[0]!r}：{line.strip()}"
-            )
+# ── 结构约束（core 不得依赖第三方 / IO 层 / API 层）──
+# 已移到 `test_core_layering.py`：那条约束属于整个 `core/**`，写在 MCP 的测试文件里就只能扫
+# `core/mcp/**` —— 名字写着"core 不得依赖第三方"，实际覆盖一个子目录（审查 M4）。
 
 
 # ── 独立运行（双模式：python tests/unit/x.py 末行 ALL PASS）──

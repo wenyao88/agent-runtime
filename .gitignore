@@ -27,6 +27,9 @@ benchmark_runs/
 # 断点续跑的进度文件：跟着报告目录走，但万一被写到别处（--out .）也不该进版本库
 *.progress.jsonl
 
+# Trace 存储（TRACE_STORE=sqlite 时的本地文件，含 -journal/-wal；默认在项目根）
+trace.db*
+
 # IDE
 .idea/
 .vscode/

@@ -170,7 +170,9 @@ export default function TracePage() {
       const body = await fetchTrace(traceId);
       if (!body.available || !body.trace) {
         setDetail(null);
-        // 后端把"为什么查不到"写在 reason 里（404 的 detail 也是它）—— 照实展示，不要只说"加载失败"
+        // 兜底分支：路由对"没有这条 trace"回 404，`apiGet` 会把后端的 detail 当错误信息抛出来，
+        // 于是正常路径走下面的 catch；这里留着是为了"服务端愿意回 200 + available:false"的情况
+        // （`available` 语义就是这么定的），两条路都展示人读得懂的原因。
         setDetailReason(body.reason || "这条 trace 不可用");
         return;
       }

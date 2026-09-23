@@ -61,6 +61,11 @@ cd web && pnpm install && pnpm run dev   # http://localhost:5173
 Chat 页通过 `ws://localhost:8000/ws/agent/{session_id}` 接收 `skill_matched / step_start / thought /
 tool_call / tool_result / compaction / final_answer / done` 事件流，实时折叠展示执行过程。
 
+四个页面：**Chat**（对话与实时步骤）/** Trace**（历史轨迹与步骤树）/** Inspector**（上下文·记忆·工具·技能）/
+**Benchmark**（评测报告与消融对比）。UI 用 shadcn/ui + Tailwind v4（**浅色单主题**，不引重型框架 ——
+没有 MUI/AntD 这类库）。组件依赖的是新版 registry 的 `radix-ui` 合集包，产物约 611 kB（gzip 195 kB）；
+要更小就把 `radix-ui` 换成按需的 `@radix-ui/react-*`，本阶段没做。
+
 ### 5. 用 Docker Compose 起全套（可选）
 
 ```bash
@@ -96,6 +101,36 @@ python tests/unit/test_memory_manager.py
 | `GET /api/benchmarks` | Benchmark 历史报告小结 |
 | `GET /api/benchmarks/{run_id}` | 一份完整报告（不存在 → 404） |
 | `POST /api/benchmarks/run` | 触发一次评测（后台跑，立即返回 `run_id`） |
+| `GET /api/traces` | 历史 trace 小结（最新在前） |
+| `GET /api/traces/{trace_id}` | 单条 trace 详情（含步骤树；不存在 → 404 + 可读原因） |
+| `GET /api/traces/{trace_id}/events` | 单条 trace 的原始事件日志 |
+| `GET /api/context` | 当前上下文快照（分段 token / 预算 / 最近一次压缩） |
+
+## Trace 与 Inspector：运行过程看得见
+
+每次会话在结束时会落成**两条视图**：按步合并的 `steps` 与逐事件的 `events`。前端两个页面把它们显示出来
+（shadcn/ui + Tailwind v4，浅色单主题，四个页面同一套语言）：
+
+* **Trace 页**：左列会话列表（来源/状态徽标 + 来源过滤），右侧步骤树（`Collapsible`：思考 / 工具参数 /
+  工具结果 / 每步 token 与延迟）+ 压缩与告警摘要 + 最终回答。一步 = 一轮 LLM 调用，所以"每步 token"
+  就是那一轮的 `usage`（多工具并行调用属于同一轮，token 不按工具拆）；
+* **Inspector 页**：四个 Tab —— **上下文**（分段 token 条 + 压缩阈值线 + 最近一次压缩的省/丢/摘要成本）、
+  **记忆**（三层开关与最近条目）、**工具**（目录 + 参数 schema 展开）、**技能**（触发词与依赖工具）。
+
+口径与天花板：
+
+* `source` 区分 `chat` / `benchmark` / `demo` —— **评测轨迹不会混进聊天列表**（前端按来源过滤才有意义）；
+* `/api/context` 反映**最近一次聊天会话**的上下文。拿不到时 `available: false` + 可读原因，HTTP 仍 **200**
+  （前端直接展示原因，不用 500 装死）；并发多会话时看到的是最后那一次；评测 agent 的上下文不进这里；
+* trace **默认内存环形**（默认 50 条，满了淘汰最旧，重启即丢）；要跨重启就把 `TRACE_STORE=sqlite`
+  （`TRACE_DB_PATH` 默认 `trace.db`）—— 单进程、无并发写保证。**坏存储不阻断启动**：路径不可用 → 直接换成内存
+  store；文件能打开但不是数据库（垃圾文件）→ 仍用 SQLite 但读写降级为空。两条路都把原因记进
+  `errors` 并显示在 Trace 页顶部（"可用但读空"和"根本没落盘"不是一回事，所以分得开）；
+* 前端**进页面时拉一次**，不做实时推送；trace 的 PG 三表未建（协议已留好，接上即可）；
+* **"没测到"和"真的是 0"**：`TokenUsage` 这个类型全仓用 0 表示"provider 没报 usage"，
+  前端不区分（页面照实显示 0）—— 这是既有口径，不是本页的取舍；
+* 前端只做了**静态**断言（页面确实用了 shadcn 组件、主题只有 light 变量、`components.json` 的别名指向真实文件，
+  见 `tests/unit/test_web_pages.py`）+ `tsc -b` + `vite build`；**渲染效果仍需人眼验收**。
 
 ## 内置工具（8 个原生工具 + 任意 MCP 工具）
 
@@ -127,6 +162,50 @@ python tests/unit/test_memory_manager.py
 启动时（FastAPI lifespan）连接并发现工具，包装成 `MCPToolAdapter` 注入**同一个** registry，
 工具名带 server 前缀（`filesystem__read_file`）避免与原生工具撞名。配置文件缺失/损坏、或某个 server
 起不来，只在 `app.state.mcp_errors` 里记录，**绝不阻断启动**。
+
+## MCP Server（自研）：把本项目的工具给别人用
+
+反向也做了：本项目**自己就是一个 MCP Server**，把 8 个原生工具通过 **stdio** 暴露给任意 MCP 客户端。
+协议实现是自研的（`core/mcp/server.py` 的协议核心 + `infrastructure/mcp/server.py` 的 stdio 循环），
+**不依赖官方 `mcp` SDK**，也没有第三方依赖：
+
+```bash
+python scripts/mcp_server.py                        # 项目根为工作区
+python scripts/mcp_server.py --root D:/work/repo --name my-tools
+```
+
+| 请求 | 响应 |
+|---|---|
+| `initialize` | `protocolVersion` / `capabilities.tools` / `serverInfo` |
+| `notifications/initialized` | **无响应**（通知不回） |
+| `tools/list` | `{tools:[{name, description, inputSchema}]}` |
+| `tools/call` | `{content:[{type:"text",text}], isError}`；工具失败 → `isError: true` + 错误文本（**异常绝不抛穿 stdio 循环**） |
+| 未知 method | JSON-RPC `-32601` |
+| 未知工具 | JSON-RPC `-32602` |
+
+接到 Claude Desktop（`claude_desktop_config.json`）：
+
+```json
+{ "mcpServers": { "agent-runtime": {
+  "command": "python",
+  "args": ["D:/deepseek_harness/first/scripts/mcp_server.py", "--root", "D:/deepseek_harness/first"] } } }
+```
+
+天花板：只有 **stdio + tools**（没有 HTTP/SSE、没有 resources/prompts/sampling）；协议版本
+`2024-11-05`；**没有鉴权**，只在本机 / 受信环境跑；`read_file` / `pdf_read` 用 `--root` 限制在给定目录内。
+
+自研实现的正确性有两层证据：
+
+1. **进程内闭环**（`tests/unit/test_mcp_roundtrip.py`）：把既有 `MCPClient` 与自研 server 用内存管道对接，
+   8/8 原生工具全部发现，并真的 `read_file` 读到 README 内容；
+2. **真实子进程 stdio**：`python -X utf8 scripts/mcp_server.py < transcript.jsonl > out.jsonl`（stdin 用
+   **文件重定向**，不是管道 —— 沙箱拒绝带管道的子进程）。实测 exit 0、stderr 为空、响应 id 全对应、
+   `tools/list` 8 个工具、`read_file` 读回 4015 字符、未知工具 `-32602`、坏 JSON 行**不产生**响应。
+
+**未验证**：Claude Desktop 真机接入（要装那个客户端，也只能在图形界面里点）。
+
+天花板（写下来免得被当成"没实现"）：**合法 JSON 但不是对象**（`[1,2]` / `"x"` / `42`）的行不产生响应
+（JSON-RPC 严格说该回 `-32600`）—— MCP 不用 batch，客户端不会因此永久等待；这条已由测试钉成**有意行为**。
 
 ## Skills：领域 SOP（Markdown 定义）
 
@@ -272,7 +351,9 @@ python scripts/inspect_run.py --json                       # 机器可读
 
 天花板：每步 token 未统计（一次响应可含多个工具调用，归属口径不明确）；串行执行（100+ 条时再加并发）；
 报告存 JSON 文件、未入库；**压缩比可以为负**（那说明 `after > before`，即上下文变大，属于真实数据不加修饰）；
-`list_runs` 按 ISO 字符串排序（写入带时区偏移的时间戳时会失真）；真实 100 条成绩与裁判评分只能在你的机器上跑出来。
+`list_runs` 按 ISO 字符串排序（写入带时区偏移的时间戳时会失真）；真实 100 条成绩与裁判评分只能在你的机器上跑出来；
+**前端 Benchmark 页只触发 mock 自检**（没有 provider / limit / judge 控件，加它们属于新能力，本阶段只统一了风格）——
+真实评测走上面的 CLI（`--limit` / `--group` / `--ablation`）。
 
 ### 消融实验：记忆/压缩到底有没有用
 
@@ -306,6 +387,13 @@ python scripts/run_benchmark.py --provider mock --ablation --limit 3   # 离线�
 天花板：不做统计显著性检验（100 级样本只给均值与计数）；不做并发；judge 单次采样，噪声未消除；
 对比报告只按 `pair_role` 切分**逐任务判分**（成功率/步数/token），压缩与摘要成本只能看整组合计 ——
 事件流不进单组报告，所以没法按角色拆分。
+
+**真实成绩位留空**：三组真实数据的报告还没跑（沙箱里没有 LLM 凭据，且这是要花钱的调用）。
+这里**不放占位数、不写示例数字** —— 跑完下面这条再贴真实报告：
+
+```bash
+python scripts/run_benchmark.py --provider real --ablation --limit 20   # 20 条 × 3 组
+```
 
 ### 断点续跑：几小时的评测断了不用从头来
 
@@ -356,15 +444,18 @@ python scripts/run_demo1_github.py --repo fastapi/fastapi --session-id smoke-1
 
 ```
 src/agent_runtime/
-  core/           协议与纯逻辑：agent(ReAct) / llm / tool / skill / memory / context / trace / benchmark
-  infrastructure/ 实现：llm(OpenAI 兼容 + Mock + 摘要器) / mcp / db / memory(Redis·PG) / tools / skills / benchmark
-  api/            FastAPI：routes / ws / schemas / deps / app
+  core/           协议与纯逻辑：agent(ReAct) / llm / tool / skill / memory / context / trace / benchmark / mcp
+  infrastructure/ 实现：llm / mcp(客户端 + 自研 server 的 stdio 循环) / db / memory(Redis·PG) / tools / skills /
+                  benchmark / trace(内存环形 + 可选 SQLite)
+  api/            FastAPI：routes（chat / tools / skills / memories / benchmarks / traces / context）/ ws /
+                  schemas / deps / app
   config/         settings（pydantic-settings）与日志
 skills/           内置技能（Markdown SOP）
 benchmarks/       评测任务集（tasks.json）
 benchmark_runs/   评测报告落盘（gitignore）
 alembic/          memory_entries 迁移（pgvector）
-scripts/          run_demo_mock.py（零依赖）/ run_demo1_github.py（真实链路）/ run_benchmark.py（评测）
+scripts/          run_demo_mock.py（零依赖）/ run_demo1_github.py（真实链路）/ run_benchmark.py（评测）/
+                  inspect_run.py（只读看报告）/ mcp_server.py（把工具暴露出去）
 tests/            unit/（无需 pytest 也能跑）+ integration/
-web/              React + Vite 前端（Chat / Trace / Inspector / Benchmark）
+web/              React 19 + Vite + Tailwind v4 + shadcn/ui（Chat / Trace / Inspector / Benchmark）
 ```
