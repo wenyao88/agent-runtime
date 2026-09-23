@@ -107,7 +107,14 @@ class ContextManager:
 
     async def compact(self, strategy: CompactionStrategy | None = None) -> CompactionResult:
         before = self.token_count()
-        chosen = strategy or decide_strategy(self.token_ratio())
+        if strategy is not None:
+            chosen = strategy
+        elif decide_strategy(self.token_ratio()) is CompactionStrategy.SUMMARIZE:
+            chosen = CompactionStrategy.SUMMARIZE
+        else:
+            # 自动模式**永不**直接丢消息：先试免费的 SQUEEZE，不够再摘要，最后才 TRUNCATE。
+            # （`decide_strategy` 在 0.90~0.95 档返回 TRUNCATE，若照它执行，摘要连试都不会试 —— 审查 I3。）
+            chosen = CompactionStrategy.SQUEEZE
         result = CompactionResult(strategy=chosen, tokens_before=before, tokens_after=before)
 
         if chosen is CompactionStrategy.SQUEEZE:
@@ -209,10 +216,12 @@ class ContextManager:
             result.degraded_reason = "摘要器返回空内容"
             return False
 
+        summary_message = Message(
+            role="user", content=format_summary_message(text, len(old))
+        )
         head = [m for m in head if m is not self._pinned_summary]
-        summary = Message(role="user", content=format_summary_message(text, len(old)))
-        self._pinned_summary = summary
-        head.append(summary)
+        self._pinned_summary = summary_message
+        head.append(summary_message)
         self._messages = head + keep
         result.summarized_messages = len(old)
         return True

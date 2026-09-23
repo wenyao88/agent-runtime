@@ -517,6 +517,72 @@ def test_missing_summarizer_is_reported_before_missing_material() -> None:
     assert "未配置摘要器" in result.degraded_reason, result.degraded_reason
 
 
+def test_auto_mode_tries_summarize_in_the_truncate_band() -> None:
+    """审查 I3：ratio 落在 [0.90,0.95) 时，自动模式必须**先试摘要**，而不是直接丢消息。
+
+    `decide_strategy` 在这一档返回 TRUNCATE，而旧实现遇到 TRUNCATE 就跳过摘要 ——
+    于是"丢消息之前先摘要"这条阶梯主张在最常见的一档里根本没生效。
+    """
+
+    async def run():
+        budget = TokenBudget(model_max_tokens=1_000_000, reserved_output=0, safety_margin=1.0)
+        cm = ContextManager(
+            budget=budget, keep_recent=1, summarizer=_recording_summarizer([])
+        )
+        await cm.build(task="任务", system_prompt="system")
+        cm.append(Message(role="assistant", content="A" * 2000))
+        cm.append(Message(role="assistant", content="最近"))
+        budget.model_max_tokens = max(1, int(cm.token_count() / 0.92))
+        assert cm.should_compact() is True
+        return await cm.compact()
+
+    result = asyncio.run(run())
+    assert result.summarized_messages >= 1, "这一档也必须先试摘要"
+    assert result.strategy is CompactionStrategy.SUMMARIZE
+
+
+def test_an_oversized_summary_is_capped_so_the_context_cannot_explode() -> None:
+    """审查 I4：摘要输出必须**封顶**，否则一次"压缩"能把上下文放大几千倍（探针 before=2 → after=7507）。
+
+    只封顶、不额外要求"必须比原文短"：摘要要保住信息，而它自带标记；对极短素材强求"更短"
+    会把合法摘要也拒掉，反而退化成丢信息。
+    """
+
+    async def huge(text: str) -> str:
+        return "Z" * 30000
+
+    async def run():
+        cm = await _built_with_summarizer(1, huge)
+        cm.append(Message(role="assistant", content="短"))
+        cm.append(Message(role="assistant", content="最近"))
+        before = cm.token_count()
+        result = await cm.compact(strategy=CompactionStrategy.SUMMARIZE)
+        return result, before, cm.token_count(), cm.get_messages()
+
+    result, before, after, messages = asyncio.run(run())
+    assert result.summarized_messages == 1
+    assert after < before + 3000, f"摘要被截断到上限，不可能把上下文炸掉（{before} → {after}）"
+    assert "已截断" in (messages[2].content or ""), "封顶截断必须带标记"
+
+
+def test_a_long_summary_is_capped_and_marked() -> None:
+    async def longish(text: str) -> str:
+        return "Y" * 5000
+
+    async def run():
+        cm = await _built_with_summarizer(1, longish)
+        cm.append(Message(role="assistant", content="X" * 20000))
+        cm.append(Message(role="assistant", content="最近"))
+        result = await cm.compact(strategy=CompactionStrategy.SUMMARIZE)
+        return result, cm.get_messages()
+
+    result, messages = asyncio.run(run())
+    assert result.summarized_messages == 1
+    summary = messages[2].content or ""
+    assert len(summary) < 2200, len(summary)
+    assert "已截断" in summary, "摘要被截断必须带标记"
+
+
 def _run_all() -> None:
     tests = [
         v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)

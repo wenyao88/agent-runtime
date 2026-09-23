@@ -23,7 +23,12 @@ MAX_TOTAL_CHARS = 24000
 
 _TRUNCATED_MARK = "…（本条已截断 {omitted} 字符）"
 _OMITTED_MARK = "…（更早的 {omitted} 条消息因长度上限未纳入摘要）"
+_SUMMARY_TRUNCATED_MARK = "…（摘要已截断 {omitted} 字符）"
 _TOOL_LABEL = "observation"
+
+# 摘要正文的上限：输出没有上限时，一次"压缩"完全可能把上下文变大
+# （审查实测：before=2 → after=7507）—— 那就成了"用一次 LLM 调用换一次上下文膨胀"。
+SUMMARY_MAX_CHARS = 2000
 
 SUMMARY_PROMPT = (
     "下面是一段 Agent 与工具交互的早期记录（可能已被截断）。把它压缩成一段简短摘要，"
@@ -79,8 +84,16 @@ def render_for_summary(
     return body
 
 
-def format_summary_message(text: str, folded: int) -> str:
-    """把摘要正文包装成一条带标记的消息内容；正文为空时只留标记（不留空消息）。"""
+def format_summary_message(
+    text: str, folded: int, max_chars: int = SUMMARY_MAX_CHARS
+) -> str:
+    """把摘要正文包装成一条带标记的消息内容；正文为空时只留标记（不留空消息）。
+
+    正文有上限且**截断带标记**（见 `SUMMARY_MAX_CHARS`）。
+    """
     body = (text or "").strip()
+    if len(body) > max_chars:
+        omitted = len(body) - max_chars
+        body = body[:max_chars] + _SUMMARY_TRUNCATED_MARK.format(omitted=omitted)
     mark = SUMMARY_MARK.format(folded=folded)
     return f"{mark}\n{body}" if body else mark
