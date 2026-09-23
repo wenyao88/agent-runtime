@@ -1,12 +1,12 @@
 # Agent Runtime — 技术研究与研发 Agent 运行框架
 
 自研单 Agent Runtime，覆盖 **ReAct Loop / Function Calling / Tool Registry / MCP / Skills / 三层 Memory /
-Context Manager / Context Compaction / Agent Trace**，并以两个真实场景验证：GitHub 仓库分析、技术调研报告。
+Context Manager / Context Compaction / Agent Trace / Benchmark**，并以两个真实场景验证：GitHub 仓库分析、技术调研报告。
 
 ```
 ReAct → Function Calling → Tool Registry → MCP → Skills
 → Memory (Working / Short-term / Long-term) → Context Manager
-→ Context Compaction (Squeeze / Summarize / Truncate) → Trace
+→ Context Compaction (Squeeze / Summarize / Truncate) → Trace → Benchmark
 ```
 
 ## 架构
@@ -93,6 +93,9 @@ python tests/unit/test_memory_manager.py
 | `GET /api/skills` | 当前已加载的技能 |
 | `GET /api/memories` | 三层记忆的开关状态、召回结果、装配与运行期错误 |
 | `DELETE /api/memories` | 清空记忆（可按 `session_id`） |
+| `GET /api/benchmarks` | Benchmark 历史报告小结 |
+| `GET /api/benchmarks/{run_id}` | 一份完整报告（不存在 → 404） |
+| `POST /api/benchmarks/run` | 触发一次评测（后台跑，立即返回 `run_id`） |
 
 ## 内置工具（8 个原生工具 + 任意 MCP 工具）
 
@@ -215,6 +218,36 @@ AGENT_CONTEXT_COMPACTION_THRESHOLD=0.8
 - **保留窗口本身超预算时压不下去**：此时每次检查都报 `noop`，上下文会持续高于阈值
   （不丢当前任务与最近消息是硬约束）。
 
+## Benchmark：跑任务集，产出可复现的数字
+
+```bash
+python scripts/run_benchmark.py --provider mock            # 离线跑全量 20 条（不需要 key / 网络）
+python scripts/run_benchmark.py --provider real --limit 3  # 真实链路抽样（会花钱）
+python scripts/run_benchmark.py --provider real --judge 3  # 另抽 3 条做 LLM 裁判
+```
+
+任务集在 `benchmarks/tasks.json`（20 条：GitHub 分析 10 + 技术调研 10）；报告写到 `benchmark_runs/`（已 gitignore）。
+也可走 API（`GET /api/benchmarks`、`GET /api/benchmarks/{run_id}`、`POST /api/benchmarks/run`），前端 **Benchmark** 页
+可看历史运行与逐任务明细。
+
+### 8 个指标与口径
+
+| 指标 | 口径 |
+|---|---|
+| 成功率 | 必需工具全覆盖 **且** 期望关键词全命中 **且** 无告警（全工具失败 / 撞 `max_steps`） |
+| 工具选择准确率 | `已用工具 ⊇ 必需工具` 的任务占比 |
+| 工具参数准确率 | 任务声明的 `expected_args` 命中数 / 声明总数（**只在声明过的任务上算**） |
+| 平均步数 / 平均 token / 平均耗时 | 逐任务 `AgentResult` 的均值 |
+| 压缩比 | `Σ(压缩前 − 压缩后) / Σ压缩前`，来自 `compaction` 事件，并按策略拆分 |
+| 错误恢复率 | 发生过工具失败的**任务**中"最终仍成功"的占比 |
+
+**`—` 不是 0**：分母为 0 的指标（没有声明参数 / 没有任务失败 / 没有压缩事件）一律显示 `—`，表示"没测"。
+每份报告自带 `provider` / 模型 / 条数 / 时间戳 —— `mock` 是离线夹具（合成压缩事件、按任务声明直接调用工具），
+**不是真实成绩**，CLI 与前端都会明确标出。
+
+天花板：每步 token 未统计（一次响应可含多个工具调用，归属口径不明确）；串行执行（100+ 条时再加并发）；
+报告存 JSON 文件、未入库；真实 20 条成绩与裁判评分只能在你的机器上跑出来。
+
 ## 输出可信度（防幻觉）
 
 工具型 Agent 最大的失真来源不是工具挂了，而是**工具挂了模型却照写报告**。本项目在三个层面兜底：
@@ -240,13 +273,15 @@ python scripts/run_demo1_github.py --repo fastapi/fastapi --session-id smoke-1
 
 ```
 src/agent_runtime/
-  core/           协议与纯逻辑：agent(ReAct) / llm / tool / skill / memory / context / trace
-  infrastructure/ 实现：llm(OpenAI 兼容 + Mock) / mcp / db / memory(Redis·PG) / tools / skills
+  core/           协议与纯逻辑：agent(ReAct) / llm / tool / skill / memory / context / trace / benchmark
+  infrastructure/ 实现：llm(OpenAI 兼容 + Mock + 摘要器) / mcp / db / memory(Redis·PG) / tools / skills / benchmark
   api/            FastAPI：routes / ws / schemas / deps / app
   config/         settings（pydantic-settings）与日志
 skills/           内置技能（Markdown SOP）
+benchmarks/       评测任务集（tasks.json）
+benchmark_runs/   评测报告落盘（gitignore）
 alembic/          memory_entries 迁移（pgvector）
-scripts/          run_demo_mock.py（零依赖）/ run_demo1_github.py（真实链路）
+scripts/          run_demo_mock.py（零依赖）/ run_demo1_github.py（真实链路）/ run_benchmark.py（评测）
 tests/            unit/（无需 pytest 也能跑）+ integration/
-web/              React + Vite 前端
+web/              React + Vite 前端（Chat / Trace / Inspector / Benchmark）
 ```
