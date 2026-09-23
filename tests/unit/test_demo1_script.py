@@ -102,6 +102,45 @@ def test_summary_has_no_warning_marker_on_success() -> None:
     assert "⚠" not in text
 
 
+def test_summary_shows_rounds_alongside_steps() -> None:
+    """步数与轮次是两个数：一轮里模型可以一次发多个 tool_calls，只看"步数"会误判离 `max_steps` 还有多远。
+
+    口径与 `run_benchmark.py` 一致（`轮次 x/y`），避免两个入口各写一套。
+    """
+    import types
+
+    module = _load()
+
+    class FakeResult:
+        steps = [1, 2, 3]
+        rounds = 2
+        max_steps = 15
+        total_tokens = types.SimpleNamespace(total_tokens=123)
+        total_latency_ms = 45
+        trace_id = "abc123"
+        warning = None
+
+    text = module.format_summary(FakeResult())
+    assert "步数 3" in text, text
+    assert "轮次 2/15" in text, text
+
+
+def test_summary_omits_rounds_when_the_result_does_not_report_it() -> None:
+    """没报轮次就不打印 —— **`None` ≠ `0`**：不知道不等于"跑了 0 轮"（老对象没有这个字段）。"""
+    import types
+
+    module = _load()
+
+    class FakeResult:
+        steps = [1]
+        total_tokens = types.SimpleNamespace(total_tokens=10)
+        total_latency_ms = 5
+        trace_id = "ok"
+        warning = None
+
+    assert "轮次" not in module.format_summary(FakeResult())
+
+
 def test_tool_result_is_truncated_by_lines_and_marked() -> None:
     """工具结果必须**按行**截断并明确标注。
 

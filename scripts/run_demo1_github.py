@@ -111,13 +111,23 @@ def format_context_errors(errors: object) -> str:
 
 
 def format_summary(result: object) -> str:
-    """收尾摘要：步数 / token / 耗时 / trace / **命中技能**，以及**告警**（有就必须出现）。"""
+    """收尾摘要：步数 / 轮次 / token / 耗时 / trace / **命中技能**，以及**告警**（有就必须出现）。
+
+    轮次与步数是两个数（一轮里模型可以一次发多个 `tool_calls`），口径与 `run_benchmark.py` 一致；
+    拿不到轮次就**不打印** —— `None ≠ 0`，不知道不等于"跑了 0 轮"。
+    """
     steps = len(getattr(result, "steps", None) or [])
     usage = getattr(result, "total_tokens", None)
     tokens = getattr(usage, "total_tokens", 0) if usage is not None else 0
     latency = getattr(result, "total_latency_ms", 0)
     trace_id = getattr(result, "trace_id", "")
-    lines = [f"步数 {steps} · token {tokens} · 耗时 {latency}ms · trace {trace_id}"]
+    rounds = int(getattr(result, "rounds", 0) or 0)
+    max_steps = int(getattr(result, "max_steps", 0) or 0)
+    segments = [f"步数 {steps}"]
+    if rounds:
+        segments.append(f"轮次 {rounds}/{max_steps}" if max_steps else f"轮次 {rounds}")
+    segments += [f"token {tokens}", f"耗时 {latency}ms", f"trace {trace_id}"]
+    lines = [" · ".join(segments)]
     skills_line = format_skills(getattr(result, "skills_used", None))
     if skills_line:
         lines.append(skills_line)
