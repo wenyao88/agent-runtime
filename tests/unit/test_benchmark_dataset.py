@@ -114,6 +114,36 @@ def test_parse_keeps_an_unknown_category() -> None:
     assert errors == []
 
 
+# ── 成对任务（消融的 memory 组要靠它测跨任务复用） ──
+
+
+def test_parse_reads_pair_fields() -> None:
+    tasks, errors = parse_tasks(
+        json.dumps([_raw(pair_id="gh-p01", pair_role="followup")])
+    )
+    assert errors == []
+    assert tasks[0].pair_id == "gh-p01"
+    assert tasks[0].pair_role == "followup"
+
+
+def test_parse_defaults_a_standalone_task_to_no_pair() -> None:
+    tasks, _ = parse_tasks(json.dumps([_raw()]))
+    assert tasks[0].pair_id == "" and tasks[0].pair_role == ""
+
+
+def test_parse_keeps_an_unknown_pair_role_but_says_so() -> None:
+    """不认识的 role 只记错误、**不丢任务**（与 category 同一种容错态度）。"""
+    tasks, errors = parse_tasks(json.dumps([_raw(pair_id="p1", pair_role="middle")]))
+    assert [t.pair_role for t in tasks] == ["middle"]
+    assert len(errors) == 1 and "pair_role" in errors[0]
+
+
+def test_parse_flags_a_role_without_a_pair_id() -> None:
+    tasks, errors = parse_tasks(json.dumps([_raw(pair_role="followup")]))
+    assert [t.pair_id for t in tasks] == [""]
+    assert len(errors) == 1 and "pair_id" in errors[0]
+
+
 def test_load_missing_file_reports_an_error() -> None:
     tasks, errors = load_tasks(str(_ROOT / "definitely" / "missing.json"))
     assert tasks == [] and len(errors) == 1
@@ -122,17 +152,60 @@ def test_load_missing_file_reports_an_error() -> None:
 # ── 仓库里的那份任务集 ──
 
 
+_TARGET = 100
+_PAIRS_PER_CATEGORY = 10
+
+
 def test_repo_task_set_is_usable() -> None:
     tasks, errors = load_tasks(str(_TASKS))
     assert errors == [], errors
-    assert len(tasks) == 20, len(tasks)
-    assert len({t.task_id for t in tasks}) == 20
+    assert len(tasks) == _TARGET, len(tasks)
+    assert len({t.task_id for t in tasks}) == _TARGET
     assert {t.category for t in tasks} <= _KNOWN_CATEGORIES
     for task in tasks:
         assert task.required_tools, f"{task.task_id} 没声明 required_tools"
         assert task.expected_keywords, f"{task.task_id} 没声明 expected_keywords"
     counts = {c: sum(1 for t in tasks if t.category == c) for c in _KNOWN_CATEGORIES}
-    assert counts == {"github_analysis": 10, "tech_research": 10}, counts
+    assert counts == {"github_analysis": 50, "tech_research": 50}, counts
+
+
+def test_repo_task_set_has_paired_followups_in_order() -> None:
+    """每类 10 对：`followup` **紧跟**它的 `first`（同会话跑时"上一条"就是那条 first）。
+
+    这是消融 memory 组的量具本身 —— 成对任务写错了，这一组测出来的差别就不是记忆的功劳。
+    """
+    tasks, _ = load_tasks(str(_TASKS))
+    pairs: dict[str, list] = {}
+    for task in tasks:
+        if task.pair_id:
+            pairs.setdefault(task.pair_id, []).append(task)
+
+    by_category: dict[str, int] = {}
+    for pair_id, members in pairs.items():
+        roles = sorted(t.pair_role for t in members)
+        assert roles == ["first", "followup"], f"{pair_id} 的角色不是一 first 一 followup：{roles}"
+        first = next(t for t in members if t.pair_role == "first")
+        followup = next(t for t in members if t.pair_role == "followup")
+        assert first.category == followup.category, f"{pair_id} 跨类别成对"
+        # 相邻：followup 就在 first 后面一条
+        index = {t.task_id: i for i, t in enumerate(tasks)}
+        assert index[followup.task_id] == index[first.task_id] + 1, f"{pair_id} 的两条不相邻"
+        # 同主题：followup 的文本里必须出现 first 的某个关键词
+        shared = [
+            k for k in first.expected_keywords if k.lower() in followup.task.lower()
+        ]
+        assert shared, (
+            f"{pair_id} 的 followup 看起来和 first 不同主题："
+            f"{followup.task_id} 文本里没有 {first.expected_keywords}"
+        )
+        by_category[first.category] = by_category.get(first.category, 0) + 1
+
+    assert by_category == {
+        "github_analysis": _PAIRS_PER_CATEGORY,
+        "tech_research": _PAIRS_PER_CATEGORY,
+    }, by_category
+    paired = sum(2 for _ in pairs)
+    assert paired == 2 * _PAIRS_PER_CATEGORY * len(_KNOWN_CATEGORIES)
 
 
 def test_repo_task_set_requires_only_existing_tools() -> None:

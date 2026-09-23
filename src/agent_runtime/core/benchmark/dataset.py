@@ -13,6 +13,8 @@ from pathlib import Path
 
 from .models import BenchmarkTask
 
+_PAIR_ROLES = {"", "first", "followup"}
+
 
 def _as_int(value: object, default: int) -> tuple[int, bool]:
     """返回 (值, 是否使用了默认值)。"""
@@ -74,7 +76,16 @@ def _parse_one(
         return None, f"{task_id}: expected_args 必须是对象，已跳过"
 
     min_steps, bad_steps = _as_int(item.get("min_steps"), 1)
-    note = f"{task_id}: min_steps 不是数字，已按 {min_steps} 处理" if bad_steps else ""
+    notes = [f"{task_id}: min_steps 不是数字，已按 {min_steps} 处理"] if bad_steps else []
+
+    # 成对任务：`pair_role` 只认 first/followup，别的值留着（可见）+ 记一条错误，绝不因此丢掉任务
+    pair_id = str(item.get("pair_id") or "").strip()
+    pair_role = str(item.get("pair_role") or "").strip()
+    if pair_role not in _PAIR_ROLES:
+        notes.append(f"{task_id}: pair_role 不认识（{pair_role!r}），已按原样保留")
+    if pair_role and not pair_id:
+        notes.append(f"{task_id}: 有 pair_role 却没有 pair_id，无法参与成对统计")
+
     return (
         BenchmarkTask(
             task_id=task_id,
@@ -89,8 +100,10 @@ def _parse_one(
             },
             min_steps=min_steps,
             expected_answer_hints=str(item.get("expected_answer_hints") or ""),
+            pair_id=pair_id,
+            pair_role=pair_role,
         ),
-        note,
+        "；".join(notes),
     )
 
 

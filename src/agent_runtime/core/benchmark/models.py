@@ -24,6 +24,15 @@ class BenchmarkTask:
     min_steps: int = 1
     expected_answer_hints: str = ""
 
+    pair_id: str = ""
+    """成对任务的组名（空 = 独立任务）。
+
+    成对任务的用途：`followup` 只有"记得上一条"才做得好 —— 消融的 memory 组要靠它测出跨任务复用，
+    否则记忆开关的差别在纯独立任务上几乎不可见。"""
+
+    pair_role: str = ""
+    """`""` / `"first"` / `"followup"`；只有 `followup` 才是"依赖前一条"的那条。"""
+
 
 @dataclass
 class ToolEvent:
