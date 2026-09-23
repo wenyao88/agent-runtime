@@ -62,3 +62,7 @@ class Settings(BaseSettings):
 
     # MCP（可选能力：文件缺失即视为不启用，不影响启动）
     mcp_servers_file: str = "mcp_servers.json"
+
+    # Benchmark（Phase 6：跑任务集产出报告；相对路径按项目根解析）
+    benchmark_tasks_file: str = "benchmarks/tasks.json"
+    benchmark_runs_dir: str = "benchmark_runs"  # 报告落盘目录（已 gitignore）

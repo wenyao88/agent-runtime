@@ -22,6 +22,9 @@ web/dist/
 # Test residue
 .testtmp/
 
+# Benchmark reports (local artifacts)
+benchmark_runs/
+
 # IDE
 .idea/
 .vscode/
