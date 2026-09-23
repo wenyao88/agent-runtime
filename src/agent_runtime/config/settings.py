@@ -66,3 +66,8 @@ class Settings(BaseSettings):
     # Benchmark（Phase 6：跑任务集产出报告；相对路径按项目根解析）
     benchmark_tasks_file: str = "benchmarks/tasks.json"
     benchmark_runs_dir: str = "benchmark_runs"  # 报告落盘目录（已 gitignore）
+
+    # Trace（Phase 8：会话历史；memory 重启即丢，sqlite 跨重启）
+    trace_store: str = "memory"        # memory | sqlite
+    trace_db_path: str = "trace.db"    # 相对路径按项目根解析
+    trace_capacity: int = 50           # memory 实现保留多少条（环形，满了淘汰最旧）
